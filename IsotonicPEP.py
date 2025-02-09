@@ -335,10 +335,11 @@ class IsotonicPEP(LogisticIsotonicRegression):
                  - "block_merge": Merge consecutive points so that each block's average is in [0,1].
           3. Choose processing space and apply PAVA:
                  - "real": Work in real space using IsotonicRegression functions.
+                    * "basic": Use basic PAVA (pava_non_decreasing).
+                    * "interp": Use interpolated PAVA (pava_non_decreasing_interpolation).
                  - "logit": Work in logit space using LogisticIsotonicRegression functions.
-          4. Apply PAVA:
-                 - "basic": Use basic PAVA (pava_non_decreasing and logistic_isotonic_regression).
-                 - "interp": Use interpolated PAVA (pava_non_decreasing_interpolation and logistic_isotonic_interpolation).
+                    * "basic": Use logistic basic PAVA (logistic_isotonic_regression).
+                    * "interp": Use logistic interpolated PAVA (logistic_isotonic_interpolation).
         
         Parameters:
             q_values: list of floats, the q_values (assumed non-decreasing).
