@@ -324,7 +324,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
         raw_pep = [qn[0]] + [qn[i] - qn[i-1] for i in range(1, n)]
         return raw_pep
 
-    def pep_regression(self, q_values, raw_process_method="clip", space="real", pava_method="basic"):
+    def pep_regression(self, q_values, raw_process_method="block_merge", space="real", pava_method="interp"):
         """
         Compute smoothed PEP values from q_values with different options.
         
@@ -342,9 +342,9 @@ class IsotonicPEP(LogisticIsotonicRegression):
         
         Parameters:
             q_values: list of floats, the q_values (assumed non-decreasing).
-            raw_process_method: "clip" or "block_merge" (default "clip").
+            raw_process_method: "clip" or "block_merge" (default "block_merge").
             space: "real" or "logit" (default "real").
-            pava_method: "basic" or "interp" (default "basic").
+            pava_method: "basic" or "interp" (default "interp").
             
         Returns:
             A list of final smoothed PEP values.
