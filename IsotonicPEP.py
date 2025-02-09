@@ -333,13 +333,12 @@ class IsotonicPEP(LogisticIsotonicRegression):
           2. Process raw_pep into [0,1]:
                  - "clip": Directly clip values to [0,1].
                  - "block_merge": Merge consecutive points so that each block's average is in [0,1].
-          3. Choose processing space:
-                 - "real": Work in real space.
-                 - "logit": Convert data to logit space.
+          3. Choose processing space and apply PAVA:
+                 - "real": Work in real space using IsotonicRegression functions.
+                 - "logit": Work in logit space using LogisticIsotonicRegression functions.
           4. Apply PAVA:
-                 - "basic": Use pava_non_decreasing.
-                 - "interp": Use pava_non_decreasing_interpolation.
-          5. If logit space is used, convert back using logistic().
+                 - "basic": Use basic PAVA (pava_non_decreasing and logistic_isotonic_regression).
+                 - "interp": Use interpolated PAVA (pava_non_decreasing_interpolation and logistic_isotonic_interpolation).
         
         Parameters:
             q_values: list of floats, the q_values (assumed non-decreasing).
@@ -372,6 +371,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
             else:
                 raise ValueError("Unknown pava_method. Use 'basic' or 'interp'.")
         elif space == "logit":
+            # Use LogisticIsotonicRegression functions in logit space.
             if pava_method == "basic":
                 pep_after_pava = self.logistic_isotonic_regression(processed)
             elif pava_method == "interp":
