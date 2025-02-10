@@ -59,7 +59,7 @@ class IsotonicRegression:
             result.extend([block['avg']] * block['count'])
         return result
 
-    def pava_non_decreasing_interpolation(self, x, y):
+    def pava_non_decreasing_interpolation(self, x, y, center_method="mean"):
         """
         "Interpolated" variant of non-decreasing PAVA.
         
@@ -69,8 +69,10 @@ class IsotonicRegression:
         Steps:
           (a) Group the data into extended blocks (each point initially forms a block).
           (b) Merge adjacent blocks via PAVA (each merged block spans indices [startIdx, endIdx]).
-          (c) For each final block, compute the x-center (e.g., the average of x values in that block).
-          (d) For each point in the block, linearly interpolate between the block’s center and the next block’s center.
+          (c) For each final block, compute the x-center based on the specified center_method:
+                - "mean": the average of x values in that block.
+                - "midpoint": the midpoint of the block, i.e., (x[startIdx] + x[endIdx]) / 2.
+          (d) For each point in the block, linearly interpolate between the block's center and the next block's center.
         
         Parameters:
             x: list of floats, sorted positions.
@@ -114,9 +116,16 @@ class IsotonicRegression:
 
         # (3) For each final block, compute the x-center and store it in the 'sum' field.
         for block in stack:
-            sum_x = sum(x[i] for i in range(block['startIdx'], block['endIdx'] + 1))
-            length = block['endIdx'] - block['startIdx'] + 1
-            center = sum_x / length
+            if center_method == "mean":
+                sum_x = sum(x[i] for i in range(block['startIdx'], block['endIdx'] + 1))
+                length = block['endIdx'] - block['startIdx'] + 1
+                center = sum_x / length
+            elif center_method == "midpoint":
+                # Compute the midpoint: (first x + last x) / 2.
+                center = (x[block['startIdx']] + x[block['endIdx']]) / 2
+            else:
+                raise ValueError("Unknown center_method. Use 'mean' or 'midpoint'.")
+            # Store the computed center in the 'sum' field.
             block['sum'] = center
 
         # (4) Interpolate each final block's points.
@@ -209,7 +218,7 @@ class LogisticIsotonicRegression(IsotonicRegression):
         result = [self.logistic(val) for val in merged_logits]
         return result
 
-    def logistic_isotonic_interpolation(self, x, y):
+    def logistic_isotonic_interpolation(self, x, y, center_method="mean"):
         """
         Perform logistic isotonic interpolation:
          1. Convert y values to logit space.
@@ -230,7 +239,7 @@ class LogisticIsotonicRegression(IsotonicRegression):
             raise ValueError("x and y must have the same length")
 
         logit_vals = [self.logit(self.clamp_probability(val)) for val in y]
-        logit_interp = self.pava_non_decreasing_interpolation(x, logit_vals)
+        logit_interp = self.pava_non_decreasing_interpolation(x, logit_vals, center_method=center_method)
         result = [self.logistic(val) for val in logit_interp]
         return result
 
@@ -324,7 +333,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
         raw_pep = [qn[0]] + [qn[i] - qn[i-1] for i in range(1, n)]
         return raw_pep
 
-    def pep_regression(self, q_values, raw_process_method="block_merge", space="real", pava_method="interp"):
+    def pep_regression(self, q_values, raw_process_method="block_merge", space="real", pava_method="interp", center_method="mean"):
         """
         Compute smoothed PEP values from q_values with different options.
         
@@ -368,7 +377,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
                 pep_after_pava = self.pava_non_decreasing(processed, [1] * len(processed))
             elif pava_method == "interp":
                 x_positions = list(range(len(processed)))
-                pep_after_pava = self.pava_non_decreasing_interpolation(x_positions, processed)
+                pep_after_pava = self.pava_non_decreasing_interpolation(x_positions, processed, center_method=center_method)
             else:
                 raise ValueError("Unknown pava_method. Use 'basic' or 'interp'.")
         elif space == "logit":
@@ -377,7 +386,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
                 pep_after_pava = self.logistic_isotonic_regression(processed)
             elif pava_method == "interp":
                 x_positions = list(range(len(processed)))
-                pep_after_pava = self.logistic_isotonic_interpolation(x_positions, processed)
+                pep_after_pava = self.logistic_isotonic_interpolation(x_positions, processed, center_method=center_method)
             else:
                 raise ValueError("Unknown pava_method. Use 'basic' or 'interp'.")
         else:
