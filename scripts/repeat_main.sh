@@ -23,13 +23,12 @@ if [ ! -f "$ISOPERC_SCRIPT" ]; then
 fi
 
 for ((i=1; i<=NUM_RUNS; i++)); do
-    echo "[INFO] Running iteration $i with SEED=$SEED and OUTPUT_DIR=$OUTPUT_DIR..."
+    echo "[INFO] Running run $i with SEED=$i and OUTPUT_DIR=$OUT_DIR..."
     RUN_DIR="$OUT_DIR/run$i"
     SEED=$i
-    mkdir -p "$OUT_DIR" "$RUN_DIR"
     bash $MAIN_SCRIPT "$KNOCKING_OUT_NUM_LIST" $SEED $RUN_DIR
     bash $ISOPERC_SCRIPT $SEED $RUN_DIR
 
 done
 
-echo "[INFO] All iterations completed successfully :)"
+echo "[INFO] All iterations completed successfully."
