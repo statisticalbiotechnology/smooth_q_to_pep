@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 # ----------------------------------------------------------------------
 # Base class for isotonic regression in real space (no logistic transformations).
@@ -271,6 +272,33 @@ class IsotonicPEP(LogisticIsotonicRegression):
         self.qs = []
         self.pep_iso = []
 
+    def soft_clip(self, x, k=10, epsilon=1e-10):
+        """
+        Softly clip the input value x into the open interval (0,1) using a sigmoid-based function.
+
+        This function maps:
+        - Very small x (negative) close to epsilon,
+        - x around 0.5 maps near 0.5,
+        - Very large x (positive) close to (1 - epsilon).
+
+        The transformation is defined as:
+        
+            soft_clip(x) = epsilon + (1 - 2 * epsilon) * sigmoid(k * (x - 0.5))
+
+        where sigmoid(z) = 1 / (1 + exp(-z))
+
+        Parameters:
+            x: float or np.ndarray, input value(s).
+            k: float, controls the steepness of the sigmoid function (default 10).
+            epsilon: float, ensures values remain within (0,1) strictly (default 1e-10).
+
+        Returns:
+            A float or np.ndarray with values strictly in (0,1).
+        """
+        sigmoid_val = 1 / (1 + np.exp(-k * (x - 0.5)))  # Standard sigmoid function centered at 0.5
+        return epsilon + (1 - 2 * epsilon) * sigmoid_val
+
+
     def create_blocks_in_unit_interval_and_unfold(self, y):
         """
         Create blocks from y so that each block's average is in (0,1) and then unfold the blocks.
@@ -377,8 +405,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
         if raw_process_method == "clip":
             processed = [max(0.0, min(1.0, val)) for val in raw_pep]
         elif raw_process_method == "block_merge":
-            processed = raw_pep
-            # processed = self.create_blocks_in_unit_interval_and_unfold(raw_pep)
+            processed = self.create_blocks_in_unit_interval_and_unfold(raw_pep)
         else:
             raise ValueError("Unknown raw_process_method. Use 'clip' or 'block_merge'.")
 

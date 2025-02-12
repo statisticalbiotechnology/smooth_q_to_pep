@@ -161,4 +161,5 @@ cython_debug/
 
 data/*.mzML
 data/*.pin
+data/*.txt
 output/*
