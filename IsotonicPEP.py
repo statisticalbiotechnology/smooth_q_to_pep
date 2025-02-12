@@ -185,7 +185,7 @@ class LogisticIsotonicRegression(IsotonicRegression):
         """
         Logit function: log(p/(1-p)). Uses clamping to ensure p is within (0,1).
         """
-        p = LogisticIsotonicRegression.clamp_probability(p)
+        # p = LogisticIsotonicRegression.clamp_probability(p)
         return math.log(p/(1.0-p))
 
     def logistic_isotonic_regression(self, y, counts=None):
@@ -210,6 +210,7 @@ class LogisticIsotonicRegression(IsotonicRegression):
 
         # Convert y to logit space.
         logit_vals = [self.logit(self.clamp_probability(val)) for val in y]
+        # logit_vals = [self.logit(val) for val in y]
 
         # Perform PAVA in logit space.
         merged_logits = self.pava_non_decreasing(logit_vals, counts)
@@ -239,6 +240,7 @@ class LogisticIsotonicRegression(IsotonicRegression):
             raise ValueError("x and y must have the same length")
 
         logit_vals = [self.logit(self.clamp_probability(val)) for val in y]
+        # logit_vals = [self.logit(val) for val in y]
         logit_interp = self.pava_non_decreasing_interpolation(x, logit_vals, center_method=center_method)
         result = [self.logistic(val) for val in logit_interp]
         return result
@@ -271,38 +273,47 @@ class IsotonicPEP(LogisticIsotonicRegression):
 
     def create_blocks_in_unit_interval_and_unfold(self, y):
         """
-        Merge consecutive y[i] values so that each block's average is in [0,1],
-        then flatten the blocks into a single list.
+        Create blocks from y so that each block's average is in (0,1) and then unfold the blocks.
         
-        The approach:
-          - Accumulate values until the average falls in (0,1), then finalize the block.
-          - For any leftover block, clip its average to [0,1] and fill.
+        For each value in y, accumulate the sum and count. Compute the current average.
+        If the average is between 0 and 1 (exclusive), finalize the current block by creating
+        a list of length equal to the current count with every element equal to the average.
+        Then, reset the accumulator and continue. After processing all values, if there is a leftover,
+        clip its average to be within [0,1] (using a small epsilon if needed) and create a block.
+        Finally, unfold (concatenate) all blocks into one list.
         
         Parameters:
-            y: list of floats.
+            y: list of floats
             
         Returns:
-            A flattened list after merging.
+            result: a flattened list after merging (unfolded blocks)
         """
-        blocks = []
+        blocks = [] # This will store the finalized blocks (each block is a list)
         current_sum = 0.0
         current_count = 0
-        current_block = []
+
         for val in y:
             current_sum += val
             current_count += 1
-            current_block.append(val)
             avg = current_sum / current_count
             if avg > 0.0 and avg < 1.0:
-                blocks.append(current_block.copy())
+                # Finalize this block: create a block of length current_count filled with avg.
+                block = [avg] * current_count
+                blocks.append(block)
+                # Reset the accumulator for the next block.
                 current_sum = 0.0
                 current_count = 0
-                current_block = []
-        if current_block:
+        # Process any leftover values.
+        if current_count > 0:
             avg = current_sum / current_count
-            avg = max(0.0, min(1.0, avg))
-            clipped_block = [avg] * current_count
-            blocks.append(clipped_block)
+            # If the average is out of [0,1], clip it to a near-boundary value.
+            if avg < 0.0:
+                avg = 1e-12
+            if avg > 1.0:
+                avg = 1.0 - 1e-12
+            block = [avg] * current_count
+            blocks.append(block)
+        # "Unfold" all blocks into a single list by concatenating them.
         result = []
         for block in blocks:
             result.extend(block)
@@ -366,7 +377,8 @@ class IsotonicPEP(LogisticIsotonicRegression):
         if raw_process_method == "clip":
             processed = [max(0.0, min(1.0, val)) for val in raw_pep]
         elif raw_process_method == "block_merge":
-            processed = self.create_blocks_in_unit_interval_and_unfold(raw_pep)
+            processed = raw_pep
+            # processed = self.create_blocks_in_unit_interval_and_unfold(raw_pep)
         else:
             raise ValueError("Unknown raw_process_method. Use 'clip' or 'block_merge'.")
 
