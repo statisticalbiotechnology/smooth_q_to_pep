@@ -22,7 +22,7 @@ WORK_DIR=$(realpath "$PWD/..")
 # Define base directories
 SCRIPTS_DIR="$WORK_DIR/scripts"
 MASTER_DIR="$WORK_DIR/$OUTPUT_DIR/splinePEP"
-ISOTONIC_DIR="$WORK_DIR/$OUTPUT_DIR/IsoLogReg"
+ISOTONIC_DIR="$WORK_DIR/$OUTPUT_DIR/isoPEP"
 IP_ISOTONIC_DIR="$WORK_DIR/$OUTPUT_DIR/ipPEP"
 MASTER_NORMAL_DIR="$MASTER_DIR/0"
 REVISED_FEATURES_DIR="$MASTER_NORMAL_DIR/revised_features_pins"
@@ -68,16 +68,16 @@ for KNOCKING_OUT_NUM in "${KNOCKING_OUT_NUM_LIST[@]}"; do
         --revised_features_file "$REVISED_FEATURES_DIR/features.$KNOCKING_OUT_NUM.pin" \
         --N "$KNOCKING_OUT_NUM"
 
-    # Run standard isotonic Percolator with isotonic logistic regression
-    echo "[INFO]Running Percolator with isotonic logistic regression..."
+    # Run standard isotonic Percolator with ranged isotonic regression
+    echo "[INFO]Running Percolator with ranged isotonic regression..."
     podman run --rm -v "$WORK_DIR:/data" percolator:isotonic \
         /usr/bin/percolator -S $SEED -i 0 -Y \
-        -r "$DATA_OUTPUT_DIR/IsoLogReg/$KNOCKING_OUT_NUM/peptide.target.txt" \
-        -B "$DATA_OUTPUT_DIR/IsoLogReg/$KNOCKING_OUT_NUM/peptide.decoy.txt" \
+        -r "$DATA_OUTPUT_DIR/isoPEP/$KNOCKING_OUT_NUM/peptide.target.txt" \
+        -B "$DATA_OUTPUT_DIR/isoPEP/$KNOCKING_OUT_NUM/peptide.decoy.txt" \
         "$DATA_OUTPUT_DIR/splinePEP/0/revised_features_pins/features.$KNOCKING_OUT_NUM.pin" 2>&1 | tee "$CURRENT_ISOTONIC_DIR/percolator.log"
 
-    # Run isotonic Percolator with isotonic interpolation
-    echo "[INFO]Running Percolator with isotonic interpolation..."
+    # Run isotonic Percolator with ranged isotonic interpolation
+    echo "[INFO]Running Percolator with ranged isotonic interpolation..."
     podman run --rm -v "$WORK_DIR:/data" percolator:isotonic \
         /usr/bin/percolator -S $SEED --ip-pep -i 0 -Y \
         -r "$DATA_OUTPUT_DIR/ipPEP/$KNOCKING_OUT_NUM/peptide.target.txt" \
