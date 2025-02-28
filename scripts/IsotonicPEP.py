@@ -175,8 +175,7 @@ class TDCIsotonicPEP(IsotonicRegression):
     def __init__(self):
         pass
     
-    def process_obs(self, target=None, decoy=None, obs=None, score_col="score", type_col="type"):
-
+    def process_obs(self, target=None, decoy=None, obs=None, score_col="score", type_col="label", target_label="target", decoy_label="decoy"):
         """
         Process observation data for obs2pep.
 
@@ -188,9 +187,22 @@ class TDCIsotonicPEP(IsotonicRegression):
           - Otherwise, if target and decoy are provided separately, they are used.
         
         Returns:
-            A DataFrame with columns 'score' and 'type' (0 for target, 1 for decoy) and an "orig_idx" column preserving the original order.
+            A DataFrame with columns 'score' and 'label' (0 for target, 1 for decoy) and an "orig_idx" column preserving the original order.
             In the case of separate inputs, a "group" column is added ("target" or "decoy").
         """
+        def convert_label(x, target_label, decoy_label):
+            """
+            Convert the type values in the observation data to numeric values
+            based on the provided target_label and decoy_label.
+            """
+            x_str = str(x).strip().lower()
+            if x_str == str(target_label).strip().lower():
+                return 0
+            elif x_str == str(decoy_label).strip().lower():
+                return 1
+            else:
+                raise ValueError("Invalid label: " + str(x))
+            
         if obs is not None:
             if isinstance(obs, np.ndarray):
                 if obs.ndim == 2 and obs.shape[1] >= 2:
@@ -208,6 +220,7 @@ class TDCIsotonicPEP(IsotonicRegression):
                 df = df.rename(columns={df.columns[0]: score_col, df.columns[1]: type_col})
             else:
                 raise ValueError("obs must be a numpy array, tuple, or DataFrame.")
+            df[type_col] = df[type_col].apply(lambda x: convert_label(x, target_label, decoy_label))
         else:
             if target is not None and decoy is not None:
                 df_target = pd.DataFrame({score_col: np.array(target).astype(float)})
@@ -219,22 +232,7 @@ class TDCIsotonicPEP(IsotonicRegression):
                 df = pd.concat([df_target, df_decoy], ignore_index=True)
             else:
                 raise ValueError("For obs2pep, provide either obs or both target and decoy.")
-        # Convert type values to numeric.
-        def convert_label(x):
-            try:
-                num = float(x)
-                if num in [0, 1]:
-                    return int(num)
-            except:
-                pass
-            x_str = str(x).strip().lower()
-            if x_str == "target":
-                return 0
-            elif x_str == "decoy":
-                return 1
-            else:
-                raise ValueError("Invalid label: " + str(x))
-        df[type_col] = df[type_col].apply(convert_label)
+            
         # Preserve original order.
         if "group" in df.columns:
             df["orig_idx"] = df.groupby("group").cumcount()
@@ -242,7 +240,7 @@ class TDCIsotonicPEP(IsotonicRegression):
             df["orig_idx"] = np.arange(len(df))
         return df
 
-    def tdc_binomial_regression(self, df_obs, score_col="score", type_col="type"):
+    def tdc_binomial_regression(self, df_obs, score_col="score", type_col="label"):
         """
         Compute PEP values from observation data using isotonic regression.
         
@@ -255,9 +253,7 @@ class TDCIsotonicPEP(IsotonicRegression):
           - (f) Restore original order.
         
         Returns:
-            If a "group" column exists (i.e. separate target and decoy inputs), returns a tuple of two Series:
-                (target_pep, decoy_pep);
-            otherwise, returns a Series of PEP values aligned with the original order.
+            A Series of target PEP values aligned with the original order.
         """
         df_sorted = df_obs.sort_values(by=score_col, ascending=False).reset_index(drop=True)
         pseudo = pd.DataFrame({score_col: [np.nan], type_col: [0.5]})
@@ -274,20 +270,20 @@ class TDCIsotonicPEP(IsotonicRegression):
         if "group" in df_obs.columns:
             df_sorted["orig_idx"] = df_sorted["orig_idx"].astype(int)
             df_target = df_sorted[df_sorted["group"]=="target"].sort_values(by="orig_idx")
-            df_decoy = df_sorted[df_sorted["group"]=="decoy"].sort_values(by="orig_idx")
-            return df_target["pep"].reset_index(drop=True), df_decoy["pep"].reset_index(drop=True)
+            return df_target["pep"].reset_index(drop=True)
         else:
             df_result = df_sorted.sort_values(by="orig_idx").reset_index(drop=True)
-            return df_result["pep"]
+            df_target = df_result[df_result[type_col]==0]
+            return df_target["pep"]
 
 # ----------------------------------------------------------------------
 # Unified class for isotonic PEP estimation.
 # Provides a unified interface pep_regression() that accepts either:
 #   - For q2pep: a Series/array/list of q-values.
-#   - For obs2pep: either a single DataFrame (or tuple/numpy array) containing score and type,
-#                or separate target and decoy inputs.
+#   - For obs2pep: either a single DataFrame (or tuple/numpy array) containing score and type, 
+#                  or separate target and decoy inputs.
 #
-# In both cases, the function returns a Series (or tuple of two Series) of PEP values,
+# In both cases, the function returns a Series (or a tuple of two Series) of PEP values,
 # aligned with the original order so that users can directly assign them as new columns.
 # ----------------------------------------------------------------------
 class IsotonicPEP(TDCIsotonicPEP):
@@ -343,6 +339,33 @@ class IsotonicPEP(TDCIsotonicPEP):
             result.extend(block)
         return result
     
+    def q_from_pep(self, pep_array):
+        """
+        Given a PEP array, compute q-values via:
+           q(i) = (1 / i) * cumsum(pep up to i),
+        where pep_array is sorted in ascending order.
+
+        Steps:
+          - (a) sort pep_array ascending,
+          - (b) cumsum,
+          - (c) divide by rank,
+          - (d) restore original order.
+
+        Returns:
+            An array of estimated q-values aligned with the input order.
+        """
+        pep_array = np.array(pep_array, dtype=float)
+        idx_sorted = np.argsort(pep_array)
+        pep_sorted = pep_array[idx_sorted]
+        csum = np.cumsum(pep_sorted)
+        ranks = np.arange(1, len(pep_sorted)+1)
+        q_sorted = csum / ranks
+        # restore
+        q_est = np.zeros_like(pep_array)
+        for i, idx in enumerate(idx_sorted):
+            q_est[idx] = q_sorted[i]
+        return q_est
+
     def q_to_pep(self, q_values, smooth=False, pava_method=None, center_method=None):
         """
         Compute smoothed PEP values from q-values (q2pep).
@@ -400,51 +423,66 @@ class IsotonicPEP(TDCIsotonicPEP):
         pep_result = pep_sorted.reindex(orig_idx)
         return pep_result
     
-    def obs_to_pep(self, obs=None, target=None, decoy=None, score_col="score", type_col="type"):
+    def obs_to_pep(self, obs=None, target=None, decoy=None, score_col="score", type_col="label", target_label="target", decoy_label="decoy"):
         """
         Compute PEP values from target-decoy observations (obs2pep).
         
         Parameters:
             Either:
-              - data: a DataFrame (or tuple or numpy array) containing score and type.
+              - obs: a DataFrame (or tuple or numpy array) containing score and type.
               - or target and decoy: separate inputs (e.g., arrays or Series) for target and decoy scores.
             score_col, type_col: Column names when data is a DataFrame.
+            target_label, decoy_label: Target and decoy labels in type_col when using concatenated input.
         
         Returns:
-            If separate inputs are provided, returns a tuple of two Series (target_pep, decoy_pep);
-            otherwise, returns a Series of PEP values aligned with the original order.
+            a Series of target PEP values aligned with the original order.
         """
         if target is not None and decoy is not None:
-            df_obs = self.process_obs(target=target, decoy=decoy, obs=None, score_col=score_col, type_col=type_col)
+            df_obs = self.process_obs(target=target, decoy=decoy, obs=None, score_col=score_col, type_col=type_col, target_label=target_label, decoy_label=decoy_label)
         else:
             if obs is None:
                 raise ValueError("For obs2pep, provide either concatenated observations as obs or both target and decoy.")
-            df_obs = self.process_obs(obs=obs, score_col=score_col, type_col=type_col)
+            df_obs = self.process_obs(obs=obs, score_col=score_col, type_col=type_col, target_label=target_label, decoy_label=decoy_label)
         return self.tdc_binomial_regression(df_obs, score_col, type_col)
 
     def pep_regression(self, q_values=None, obs=None, target=None, decoy=None, method="q2pep",
-                    score_col="score", type_col="type", smooth=False, pava_method=None, center_method=None):
+                    score_col="score", type_col="label", target_label="target", decoy_label="decoy", smooth=False, pava_method=None, center_method=None, calc_q=True):
         """
-        Unified interface for computing PEP values.
+        Unified interface for computing PEP values,
+        then optionally computing q-values from PEPs.
         
         For method "q2pep":
-            - q_values: a Series/array/list of q-values.
+            - q_values: a Series/array/list of q-values,
+            - calc_q: Boolean; if True, estimate q-values from calculated PEPs,
             - smooth: Boolean; if True, apply block-merge pre-processing.
         
         For method "obs2pep":
             - Either provide data as a DataFrame (or tuple) containing score and type,
-              or provide target and decoy separately.
+              or provide target and decoy separately,
+                * target_label, decoy_label: Target and decoy labels in type_col when using concatenated input.
+            - calc_q: Boolean; if True, estimate q-values from calculated PEPs.
         
         Returns:
-            For q2pep: a Series of PEP values aligned with the input index.
-            For obs2pep: if separate inputs are provided, a tuple (target_pep, decoy_pep);
-                       otherwise, a Series of PEP values aligned with the input index.
+            an array of PEP values aligned with the input index,
+            if calc_q is True, a tuple of two arrays (pep_array, q_array).
+
+        By default, calc_q=True.
         """
         if method == "q2pep":
             if q_values is None:
                 raise ValueError("For q2pep, q-values must be provided.")
-            return self.q_to_pep(q_values=q_values, smooth=smooth, pava_method=pava_method, center_method=center_method)
+            pep_series = self.q_to_pep(q_values=q_values, smooth=smooth, pava_method=pava_method, center_method=center_method)
+            pep_array = pep_series.values
+            if not calc_q:
+                return pep_array, None
+            q_array = self.q_from_pep(pep_array)
+            return pep_array, q_array
         elif method == "obs2pep":
-            return self.obs_to_pep(obs=obs, target=target, decoy=decoy, score_col=score_col, type_col=type_col)
+            target_pep = self.obs_to_pep(obs=obs, target=target, decoy=decoy, score_col=score_col, type_col=type_col, target_label=target_label, decoy_label=decoy_label)
+            pep_array = target_pep.values
+            if not calc_q:
+                return pep_array
+            q_array = self.q_from_pep(pep_array)
+            return pep_array, q_array
         else:
             raise ValueError("Unknown method. Use 'q2pep' or 'obs2pep'.")
