@@ -163,3 +163,6 @@ data/*.mzML
 data/*.pin
 data/*.txt
 output/*
+output_latest
+figs/*
+*simplified*

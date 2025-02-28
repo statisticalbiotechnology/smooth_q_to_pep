@@ -1,8 +1,8 @@
-import math
 import numpy as np
+import pandas as pd
 
 # ----------------------------------------------------------------------
-# Base class for isotonic regression in real space (no logistic transformations).
+# Base class for isotonic regression in real space.
 # Provides:
 #   - pava_non_decreasing(): Stepwise constant solution.
 #   - pava_non_decreasing_interpolation(): Linear interpolation between block centers.
@@ -11,23 +11,27 @@ class IsotonicRegression:
     def __init__(self):
         pass
 
-    def pava_non_decreasing(self, values, counts):
+    def pava_non_decreasing(self, values, counts, min_value=0.0, max_value=1.0):
         """
         Perform standard PAVA (Pool-Adjacent-Violators Algorithm) to enforce a 
         non-decreasing sequence.
         
         Each input value is repeated according to its corresponding count.
+        After merging, each block's average is clamped to the interval [min_value, max_value].
+
         
         Parameters:
             values: list of floats, the data values.
             counts: list of ints, the number of times each value is repeated.
-            
+            min_value: lower bound for clamping (default 0.0).
+            max_value: upper bound for clamping (default 1.0).
+
         Returns:
             A list (expanded to length = sum(counts)) where each block's average 
             is repeated count times.
         """
         if len(values) != len(counts):
-            raise ValueError("values and counts must have the same length")
+            raise ValueError("values and counts must have the same length.")
         n = len(values)
         if n == 0:
             return []
@@ -57,45 +61,51 @@ class IsotonicRegression:
         # Expand the final solution: repeat each block's average according to its count.
         result = []
         for block in stack:
-            result.extend([block['avg']] * block['count'])
+            # Clamp the block average to [min_value, max_value]
+            clamped_avg = min(max(block['avg'], min_value), max_value)
+            result.extend([clamped_avg] * block['count'])
         return result
 
-    def pava_non_decreasing_interpolation(self, x, y, center_method="mean"):
+    def pava_non_decreasing_interpolation(self, x, y, center_method="mean", min_y=0.0, max_y=1.0):
         """
         "Interpolated" variant of non-decreasing PAVA.
         
         Instead of returning a stepwise-constant output, this returns a piecewise-linear 
         function across block centers.
+        Each interpolated value is clamped to the interval [min_y, max_y].
         
         Steps:
           (a) Group the data into extended blocks (each point initially forms a block).
           (b) Merge adjacent blocks via PAVA (each merged block spans indices [startIdx, endIdx]).
           (c) For each final block, compute the x-center based on the specified center_method:
                 - "mean": the average of x values in that block.
-                - "midpoint": the midpoint of the block, i.e., (x[startIdx] + x[endIdx]) / 2.
+                - "median": the midpoint between the first and last x in the block, i.e., (x[startIdx] + x[endIdx]) / 2.
           (d) For each point in the block, linearly interpolate between the block's center and the next block's center.
+          (e) Clamp each resulting value to [min_y, max_y].
         
         Parameters:
             x: list of floats, sorted positions.
             y: list of floats, the data values.
-            
+            min_y: lower bound for clamping (default 0.0).
+            max_y: upper bound for clamping (default 1.0).
+
         Returns:
             A list of floats representing the interpolated, non-decreasing values.
         """
         if len(x) != len(y):
-            raise ValueError("x and y must have the same length")
+            raise ValueError("x and y must have the same length.")
         n = len(y)
         if n == 0:
             return []
 
-        # (1) Build an extended block for each point.
+        # (a) Build an extended block for each point.
         # Each block is a dict with keys: 'sum', 'count', 'avg', 'startIdx', 'endIdx'
         blocks = []
         for i in range(n):
             block = {'sum': y[i], 'count': 1, 'avg': y[i], 'startIdx': i, 'endIdx': i}
             blocks.append(block)
 
-        # (2) Merge blocks using standard PAVA.
+        # (b) Merge blocks using standard PAVA.
         stack = []
         for block in blocks:
             stack.append(block)
@@ -115,21 +125,21 @@ class IsotonicRegression:
                 else:
                     break
 
-        # (3) For each final block, compute the x-center and store it in the 'sum' field.
+        # (c) For each final block, compute the x-center and store it in the 'sum' field.
         for block in stack:
             if center_method == "mean":
                 sum_x = sum(x[i] for i in range(block['startIdx'], block['endIdx'] + 1))
                 length = block['endIdx'] - block['startIdx'] + 1
                 center = sum_x / length
-            elif center_method == "midpoint":
-                # Compute the midpoint: (first x + last x) / 2.
+            elif center_method == "median":
+                # Compute the median: (first x + last x) / 2.
                 center = (x[block['startIdx']] + x[block['endIdx']]) / 2
             else:
-                raise ValueError("Unknown center_method. Use 'mean' or 'midpoint'.")
+                raise ValueError("Unknown center_method. Use 'mean' or 'median'.")
             # Store the computed center in the 'sum' field.
             block['sum'] = center
 
-        # (4) Interpolate each final block's points.
+        # (d) Interpolate each final block's points.
         result = [0.0] * n
         for b in range(len(stack)):
             curBlk = stack[b]
@@ -153,161 +163,147 @@ class IsotonicRegression:
                     t = (x[i] - curXc) / (nextXc - curXc)
                     t = max(0.0, min(1.0, t))
                     result[i] = curAvg + t * (nextAvg - curAvg)
+                # (e) Clamp the result to [min_y, max_y]
+                result[i] = min(max(result[i], min_y), max_y)
         return result
 
 # ----------------------------------------------------------------------
-# Derived class that applies logistic transformations around the base PAVA routines.
-# Provides:
-#   - clamp_probability(), logistic(), logit()
-#   - logistic_isotonic_regression(): stepwise-constant in logit space.
-#   - logistic_isotonic_interpolation(): piecewise-linear in logit space.
+# Inherits from the IsotonicRegression base class to perform binomial regression on
+# a stream of binary observations yielded by target-decoy competition (TDC) method.
 # ----------------------------------------------------------------------
-class LogisticIsotonicRegression(IsotonicRegression):
-    @staticmethod
-    def clamp_probability(p, eps=1e-12):
-        """
-        Clamp probability p to the interval [eps, 1-eps] to avoid numerical issues.
-        """
-        if p < eps:
-            return eps
-        if p > 1.0 - eps:
-            return 1.0 - eps
-        return p
-
-    @staticmethod
-    def logistic(x):
-        """
-        Logistic (sigmoid) function: 1/(1+exp(-x)).
-        """
-        return 1.0 / (1.0 + math.exp(-x))
-
-    @staticmethod
-    def logit(p):
-        """
-        Logit function: log(p/(1-p)). Uses clamping to ensure p is within (0,1).
-        """
-        # p = LogisticIsotonicRegression.clamp_probability(p)
-        return math.log(p/(1.0-p))
-
-    def logistic_isotonic_regression(self, y, counts=None):
-        """
-        Perform logistic isotonic regression:
-         1. Convert each y value to logit space.
-         2. Run PAVA (non-decreasing) in logit space.
-         3. Convert the result back to probability space using logistic().
-         
-        Parameters:
-            y: list of floats, input values (which might be outside [0,1]).
-            counts: optional list of ints; if omitted, each point is assumed to have count=1.
-            
-        Returns:
-            A list of calibrated probability values.
-        """
-        n = len(y)
-        if n == 0:
-            return []
-        if counts is None or len(counts) == 0:
-            counts = [1] * n
-
-        # Convert y to logit space.
-        logit_vals = [self.logit(self.clamp_probability(val)) for val in y]
-        # logit_vals = [self.logit(val) for val in y]
-
-        # Perform PAVA in logit space.
-        merged_logits = self.pava_non_decreasing(logit_vals, counts)
-
-        # Convert back to probability space.
-        result = [self.logistic(val) for val in merged_logits]
-        return result
-
-    def logistic_isotonic_interpolation(self, x, y, center_method="mean"):
-        """
-        Perform logistic isotonic interpolation:
-         1. Convert y values to logit space.
-         2. Apply the interpolated PAVA in logit space.
-         3. Convert the result back to probability space.
-         
-        Parameters:
-            x: list of floats, positions.
-            y: list of floats, input values.
-            
-        Returns:
-            A list of calibrated probability values.
-        """
-        n = len(y)
-        if n == 0:
-            return []
-        if len(x) != n:
-            raise ValueError("x and y must have the same length")
-
-        logit_vals = [self.logit(self.clamp_probability(val)) for val in y]
-        # logit_vals = [self.logit(val) for val in y]
-        logit_interp = self.pava_non_decreasing_interpolation(x, logit_vals, center_method=center_method)
-        result = [self.logistic(val) for val in logit_interp]
-        return result
-
-# ----------------------------------------------------------------------
-# Derived class that includes PEP pre-processing.
-# The q_to_pep function computes raw PEPs from q_values as follows:
-#   - Compute qn values: qn[i] = q_values[i] * (i+1)
-#   - Compute raw_pep: raw_pep[0] = qn[0], raw_pep[i] = qn[i] - qn[i-1] for i>=1
-#
-# Then, raw_pep is processed into [0,1] using one of two methods:
-#   1. "clip": Directly clip values to [0,1].
-#   2. "block_merge": Merge consecutive y[i] so that each partial block average is in [0,1]. 
-#       Then "unfold" back into a single vector.
-#
-# Next, we choose the processing space:
-#   - "real": work directly in real space.
-#   - "logit": convert data into logit space, process, then convert back via logistic().
-#
-# Finally, we choose which PAVA version to use:
-#   - "basic": basic PAVA (stepwise constant).
-#   - "interp": interpolated PAVA (piecewise-linear).
-#
-# The final output is a set of smoothed PEP values.
-# ----------------------------------------------------------------------
-class IsotonicPEP(LogisticIsotonicRegression):
+class TDCIsotonicPEP(IsotonicRegression):
     def __init__(self):
-        self.qs = []
-        self.pep_iso = []
+        pass
+    
+    def process_obs(self, target=None, decoy=None, obs=None, score_col="score", type_col="type"):
 
-    def soft_clip(self, x, k=10, epsilon=1e-10):
         """
-        Softly clip the input value x into the open interval (0,1) using a sigmoid-based function.
+        Process observation data for obs2pep.
 
-        This function maps:
-        - Very small x (negative) close to epsilon,
-        - x around 0.5 maps near 0.5,
-        - Very large x (positive) close to (1 - epsilon).
-
-        The transformation is defined as:
+        Acceptable inputs:
+          - If obs is provided:
+              * a numpy array (2D) with at least 2 columns.
+              * a tuple; the two arrays must have the same length.
+              * a DataFrame, it must contain the score and type columns.
+          - Otherwise, if target and decoy are provided separately, they are used.
         
-            soft_clip(x) = epsilon + (1 - 2 * epsilon) * sigmoid(k * (x - 0.5))
-
-        where sigmoid(z) = 1 / (1 + exp(-z))
-
-        Parameters:
-            x: float or np.ndarray, input value(s).
-            k: float, controls the steepness of the sigmoid function (default 10).
-            epsilon: float, ensures values remain within (0,1) strictly (default 1e-10).
-
         Returns:
-            A float or np.ndarray with values strictly in (0,1).
+            A DataFrame with columns 'score' and 'type' (0 for target, 1 for decoy) and an "orig_idx" column preserving the original order.
+            In the case of separate inputs, a "group" column is added ("target" or "decoy").
         """
-        sigmoid_val = 1 / (1 + np.exp(-k * (x - 0.5)))  # Standard sigmoid function centered at 0.5
-        return epsilon + (1 - 2 * epsilon) * sigmoid_val
+        if obs is not None:
+            if isinstance(obs, np.ndarray):
+                if obs.ndim == 2 and obs.shape[1] >= 2:
+                    df = pd.DataFrame(obs, columns=[score_col, type_col])
+                else:
+                    raise ValueError("The numpy array for obs must be 2D with at least 2 columns.")
+            elif isinstance(obs, (list, tuple)):
+                arr1 = np.array(obs[0])
+                arr2 = np.array(obs[1])
+                if len(arr1) != len(arr2):
+                    raise ValueError("For concatenated input, the two arrays must have the same length.")
+                df = pd.DataFrame({score_col: arr1, type_col: arr2})
+            elif isinstance(obs, pd.DataFrame):
+                df = obs.copy()
+                df = df.rename(columns={df.columns[0]: score_col, df.columns[1]: type_col})
+            else:
+                raise ValueError("obs must be a numpy array, tuple, or DataFrame.")
+        else:
+            if target is not None and decoy is not None:
+                df_target = pd.DataFrame({score_col: np.array(target).astype(float)})
+                df_target[type_col] = 0
+                df_target["group"] = "target"
+                df_decoy = pd.DataFrame({score_col: np.array(decoy).astype(float)})
+                df_decoy[type_col] = 1
+                df_decoy["group"] = "decoy"
+                df = pd.concat([df_target, df_decoy], ignore_index=True)
+            else:
+                raise ValueError("For obs2pep, provide either obs or both target and decoy.")
+        # Convert type values to numeric.
+        def convert_label(x):
+            try:
+                num = float(x)
+                if num in [0, 1]:
+                    return int(num)
+            except:
+                pass
+            x_str = str(x).strip().lower()
+            if x_str == "target":
+                return 0
+            elif x_str == "decoy":
+                return 1
+            else:
+                raise ValueError("Invalid label: " + str(x))
+        df[type_col] = df[type_col].apply(convert_label)
+        # Preserve original order.
+        if "group" in df.columns:
+            df["orig_idx"] = df.groupby("group").cumcount()
+        else:
+            df["orig_idx"] = np.arange(len(df))
+        return df
 
+    def tdc_binomial_regression(self, df_obs, score_col="score", type_col="type"):
+        """
+        Compute PEP values from observation data using isotonic regression.
+        
+        Steps:
+          - (a) Sort by score descending.
+          - (b) Prepend a pseudo observation with type 0.5.
+          - (c) Apply PAVA on the binary sequence.
+          - (d) Remove the pseudo observation.
+          - (e) Compute PEP = decoy_prob/(1 - decoy_prob), clipped to [0,1].
+          - (f) Restore original order.
+        
+        Returns:
+            If a "group" column exists (i.e. separate target and decoy inputs), returns a tuple of two Series:
+                (target_pep, decoy_pep);
+            otherwise, returns a Series of PEP values aligned with the original order.
+        """
+        df_sorted = df_obs.sort_values(by=score_col, ascending=False).reset_index(drop=True)
+        pseudo = pd.DataFrame({score_col: [np.nan], type_col: [0.5]})
+        df_aug = pd.concat([pseudo, df_sorted], ignore_index=True)
+        y_values = df_aug[type_col].values
+        fitted = self.pava_non_decreasing(list(y_values), [1] * len(y_values))
+        fitted = np.array(fitted)
+        fitted_decoy_prob = fitted[1:]  # remove pseudo observation
+        with np.errstate(divide='ignore', invalid='ignore'):
+            pep = fitted_decoy_prob / (1 - fitted_decoy_prob)
+            pep = np.clip(pep, 0, 1)
+        df_sorted["pep"] = pep
+        # Restore original order.
+        if "group" in df_obs.columns:
+            df_sorted["orig_idx"] = df_sorted["orig_idx"].astype(int)
+            df_target = df_sorted[df_sorted["group"]=="target"].sort_values(by="orig_idx")
+            df_decoy = df_sorted[df_sorted["group"]=="decoy"].sort_values(by="orig_idx")
+            return df_target["pep"].reset_index(drop=True), df_decoy["pep"].reset_index(drop=True)
+        else:
+            df_result = df_sorted.sort_values(by="orig_idx").reset_index(drop=True)
+            return df_result["pep"]
+
+# ----------------------------------------------------------------------
+# Unified class for isotonic PEP estimation.
+# Provides a unified interface pep_regression() that accepts either:
+#   - For q2pep: a Series/array/list of q-values.
+#   - For obs2pep: either a single DataFrame (or tuple/numpy array) containing score and type,
+#                or separate target and decoy inputs.
+#
+# In both cases, the function returns a Series (or tuple of two Series) of PEP values,
+# aligned with the original order so that users can directly assign them as new columns.
+# ----------------------------------------------------------------------
+class IsotonicPEP(TDCIsotonicPEP):
+    def __init__(self, pava_method="basic", center_method="mean"):
+        self.pava_method = pava_method
+        self.center_method = center_method
 
     def create_blocks_in_unit_interval_and_unfold(self, y):
         """
-        Create blocks from y so that each block's average is in (0,1) and then unfold the blocks.
+        Merge consecutive y[i] so that each block's average is in [0,1] and then unfold the blocks.
         
         For each value in y, accumulate the sum and count. Compute the current average.
-        If the average is between 0 and 1 (exclusive), finalize the current block by creating
+        If the average is between 0 and 1 (inclusive), finalize the current block by creating
         a list of length equal to the current count with every element equal to the average.
         Then, reset the accumulator and continue. After processing all values, if there is a leftover,
-        clip its average to be within [0,1] (using a small epsilon if needed) and create a block.
+        clip its average to be within [0,1] and create a block.
         Finally, unfold (concatenate) all blocks into one list.
         
         Parameters:
@@ -324,7 +320,7 @@ class IsotonicPEP(LogisticIsotonicRegression):
             current_sum += val
             current_count += 1
             avg = current_sum / current_count
-            if avg > 0.0 and avg < 1.0:
+            if avg >= 0.0 and avg <= 1.0:
                 # Finalize this block: create a block of length current_count filled with avg.
                 block = [avg] * current_count
                 blocks.append(block)
@@ -336,9 +332,9 @@ class IsotonicPEP(LogisticIsotonicRegression):
             avg = current_sum / current_count
             # If the average is out of [0,1], clip it to a near-boundary value.
             if avg < 0.0:
-                avg = 1e-12
+                avg = 0
             if avg > 1.0:
-                avg = 1.0 - 1e-12
+                avg = 1.0
             block = [avg] * current_count
             blocks.append(block)
         # "Unfold" all blocks into a single list by concatenating them.
@@ -346,90 +342,109 @@ class IsotonicPEP(LogisticIsotonicRegression):
         for block in blocks:
             result.extend(block)
         return result
-
-    def q_to_pep(self, q_values):
+    
+    def q_to_pep(self, q_values, smooth=False, pava_method=None, center_method=None):
         """
-        Convert q_values to raw PEP values and then process them.
-        
-        This function:
-          1. Computes qn values: qn[i] = q_values[i]*(i+1)
-          2. Computes raw_pep: raw_pep[0] = qn[0], for i>=1: raw_pep[i] = qn[i] - qn[i-1]
-          3. Returns raw_pep; further processing is done in pep_regression.
+        Compute smoothed PEP values from q-values (q2pep).
+
+        qn[i] = q_values[i] * (i+1)
+        raw_pep[0] = qn[0],
+        for i >= 1: raw_pep[i] = qn[i] - qn[i-1].
         
         Parameters:
-            q_values: list of floats (must be non-decreasing).
-            
+            q_values: a Series/array/list of q-values.
+            smooth: Boolean; if True, apply block-merge pre-processing.
+            pava_method: "basic" or "ip". Defaults to self.pava_method.
+            center_method: "mean" or "median". Defaults to self.center_method.
+        
         Returns:
-            A list of raw PEP values.
+            A Series of PEP values aligned with the original index.
         """
-        self.qs = q_values[:]  # store a copy of q_values
-        n = len(q_values)
+        if pava_method is None:
+            pava_method = self.pava_method
+        if center_method is None:
+            center_method = self.center_method
+        
+        # Convert to Series and record original index.
+        if not isinstance(q_values, pd.Series):
+            q_series = pd.Series(q_values)
+        else:
+            q_series = q_values.copy()
+        orig_idx = q_series.index.copy()
+
+        # Sort q_values in ascending order.
+        q_series_sorted = q_series.sort_values(ascending=True)
+        q_list = q_series_sorted.values.tolist()
+        n = len(q_list)
         qn = []
         for i in range(n):
-            qn.append(q_values[i] * (i + 1))
-            if i < n-1 and q_values[i] > q_values[i+1]:
+            qn.append(q_list[i]*(i+1))
+            if i < n-1 and q_list[i] > q_list[i+1]:
                 raise AssertionError("q_values must be non-decreasing")
-        raw_pep = [qn[0]] + [qn[i] - qn[i-1] for i in range(1, n)]
-        return raw_pep
+        raw_pep = [qn[0]] + [qn[i]-qn[i-1] for i in range(1,n)]
 
-    def pep_regression(self, q_values, raw_process_method="block_merge", space="real", pava_method="interp", center_method="mean"):
-        """
-        Compute smoothed PEP values from q_values with different options.
-        
-        Steps:
-          1. Calculate qn values and compute raw_pep from q_values.
-          2. Process raw_pep into [0,1]:
-                 - "clip": Directly clip values to [0,1].
-                 - "block_merge": Merge consecutive points so that each block's average is in [0,1].
-          3. Choose processing space and apply PAVA:
-                 - "real": Work in real space using IsotonicRegression functions.
-                    * "basic": Use basic PAVA (pava_non_decreasing).
-                    * "interp": Use interpolated PAVA (pava_non_decreasing_interpolation).
-                 - "logit": Work in logit space using LogisticIsotonicRegression functions.
-                    * "basic": Use logistic basic PAVA (logistic_isotonic_regression).
-                    * "interp": Use logistic interpolated PAVA (logistic_isotonic_interpolation).
-        
-        Parameters:
-            q_values: list of floats, the q_values (assumed non-decreasing).
-            raw_process_method: "clip" or "block_merge" (default "block_merge").
-            space: "real" or "logit" (default "real").
-            pava_method: "basic" or "interp" (default "interp").
-            
-        Returns:
-            A list of final smoothed PEP values.
-        """
-        # Step 1: Compute raw_pep from q_values.
-        raw_pep = self.q_to_pep(q_values)
-        
-        # Step 2: Process raw_pep into [0,1].
-        if raw_process_method == "clip":
-            processed = [max(0.0, min(1.0, val)) for val in raw_pep]
-        elif raw_process_method == "block_merge":
+        if smooth:
             processed = self.create_blocks_in_unit_interval_and_unfold(raw_pep)
         else:
-            raise ValueError("Unknown raw_process_method. Use 'clip' or 'block_merge'.")
-
-        # Step 3: Choose processing space and apply PAVA.
-        if space == "real":
-            # Use IsotonicRegression functions in real space.
-            if pava_method == "basic":
-                pep_after_pava = self.pava_non_decreasing(processed, [1] * len(processed))
-            elif pava_method == "interp":
-                x_positions = list(range(len(processed)))
-                pep_after_pava = self.pava_non_decreasing_interpolation(x_positions, processed, center_method=center_method)
-            else:
-                raise ValueError("Unknown pava_method. Use 'basic' or 'interp'.")
-        elif space == "logit":
-            # Use LogisticIsotonicRegression functions in logit space.
-            if pava_method == "basic":
-                pep_after_pava = self.logistic_isotonic_regression(processed)
-            elif pava_method == "interp":
-                x_positions = list(range(len(processed)))
-                pep_after_pava = self.logistic_isotonic_interpolation(x_positions, processed, center_method=center_method)
-            else:
-                raise ValueError("Unknown pava_method. Use 'basic' or 'interp'.")
-        else:
-            raise ValueError("Unknown space. Use 'real' or 'logit'.")
+            processed = raw_pep
         
-        final_pep = pep_after_pava
-        return final_pep
+        if pava_method == "basic":
+            final_pep = self.pava_non_decreasing(processed, [1]*len(processed))
+        elif pava_method == "ip":
+            x_positions = list(range(len(processed)))
+            final_pep = self.pava_non_decreasing_interpolation(x_positions, processed, center_method=center_method)
+        else:
+            raise ValueError("Unknown pava_method. Use 'basic' or 'ip'.")
+        
+        pep_sorted = pd.Series(final_pep, index=q_series_sorted.index)
+        pep_result = pep_sorted.reindex(orig_idx)
+        return pep_result
+    
+    def obs_to_pep(self, obs=None, target=None, decoy=None, score_col="score", type_col="type"):
+        """
+        Compute PEP values from target-decoy observations (obs2pep).
+        
+        Parameters:
+            Either:
+              - data: a DataFrame (or tuple or numpy array) containing score and type.
+              - or target and decoy: separate inputs (e.g., arrays or Series) for target and decoy scores.
+            score_col, type_col: Column names when data is a DataFrame.
+        
+        Returns:
+            If separate inputs are provided, returns a tuple of two Series (target_pep, decoy_pep);
+            otherwise, returns a Series of PEP values aligned with the original order.
+        """
+        if target is not None and decoy is not None:
+            df_obs = self.process_obs(target=target, decoy=decoy, obs=None, score_col=score_col, type_col=type_col)
+        else:
+            if obs is None:
+                raise ValueError("For obs2pep, provide either concatenated observations as obs or both target and decoy.")
+            df_obs = self.process_obs(obs=obs, score_col=score_col, type_col=type_col)
+        return self.tdc_binomial_regression(df_obs, score_col, type_col)
+
+    def pep_regression(self, q_values=None, obs=None, target=None, decoy=None, method="q2pep",
+                    score_col="score", type_col="type", smooth=False, pava_method=None, center_method=None):
+        """
+        Unified interface for computing PEP values.
+        
+        For method "q2pep":
+            - q_values: a Series/array/list of q-values.
+            - smooth: Boolean; if True, apply block-merge pre-processing.
+        
+        For method "obs2pep":
+            - Either provide data as a DataFrame (or tuple) containing score and type,
+              or provide target and decoy separately.
+        
+        Returns:
+            For q2pep: a Series of PEP values aligned with the input index.
+            For obs2pep: if separate inputs are provided, a tuple (target_pep, decoy_pep);
+                       otherwise, a Series of PEP values aligned with the input index.
+        """
+        if method == "q2pep":
+            if q_values is None:
+                raise ValueError("For q2pep, q-values must be provided.")
+            return self.q_to_pep(q_values=q_values, smooth=smooth, pava_method=pava_method, center_method=center_method)
+        elif method == "obs2pep":
+            return self.obs_to_pep(obs=obs, target=target, decoy=decoy, score_col=score_col, type_col=type_col)
+        else:
+            raise ValueError("Unknown method. Use 'q2pep' or 'obs2pep'.")
