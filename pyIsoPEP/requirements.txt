@@ -1,5 +1,2 @@
 numpy
 pandas
-argparse
-os
-sys
