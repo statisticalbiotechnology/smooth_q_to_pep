@@ -11,7 +11,7 @@ def parse_args():
         epilog="""
 Example usage:
   1) Q2PEP:
-     ./main.py q2pep --input example/peptide.target.txt --qcol q-value --pava-method ip --center-method mean --output /data
+     ./main.py q2pep --input example/peptide.target.txt --output /data
 
   2) OBS2PEP (a concatenated target and decoy input file):
      ./main.py obs2pep --cat-file example/peptide.cat.txt --score-col score --type-col type --target-label 0 --decoy-label 1 --output /data
