@@ -11,13 +11,13 @@ def parse_args():
         epilog="""
 Example usage:
   1) Q2PEP:
-     ./main.py q2pep --input ../example/peptide.target.txt --qcol q-value --pava-method ip --center-method mean --output ../example/results
+     ./main.py q2pep --input example/peptide.target.txt --qcol q-value --pava-method ip --center-method mean --output /data
 
   2) OBS2PEP (a concatenated target and decoy input file):
-     ./main.py obs2pep --cat-file ../example/peptide.cat.txt --score-col score --type-col type --target_label 0 --decoy_label 1 --output ../example/results
+     ./main.py obs2pep --cat-file example/peptide.cat.txt --score-col score --type-col type --target_label 0 --decoy_label 1 --output /data
 
   3) OBS2PEP (separate target and decoy input files):
-     ./main.py obs2pep --target-file ../example/peptide.target.txt --decoy-file ../example/peptide.decoy.txt --score-col score --output ../example/results
+     ./main.py obs2pep --target-file example/peptide.target.txt --decoy-file example/peptide.decoy.txt --score-col score --output /data
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -39,7 +39,7 @@ Example usage:
     parser_q.add_argument("--center-method", type=str, choices=["mean", "median"], default="mean",
                           help="Center method to use in PAVA interpolation (default: mean).")
     parser_q.add_argument("--output", type=str, required=True,
-                          help="Output file path (or output directory; if directory, a default name 'outputPEP.txt' will be used).")
+                          help="Output file path (or output directory; if directory, a default name 'outputPEP.target.txt' will be used).")
     
     # obs2pep parser
     parser_obs = subparsers.add_parser("obs2pep", help="Estimate PEP from target-decoy observations (obs2pep method).")

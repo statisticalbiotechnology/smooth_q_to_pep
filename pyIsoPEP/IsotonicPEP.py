@@ -195,7 +195,12 @@ class TDCIsotonicPEP(IsotonicRegression):
             Convert the type values in the observation data to numeric values
             based on the provided target_label and decoy_label.
             """
-            x_str = str(x).strip().lower()
+            try:
+                # Convert x to float, then to int, then to string.
+                x_str = str(int(float(x)))
+            except Exception:
+                # Fallback: use the original string representation (trimmed and lowercased)
+                x_str = str(x).strip().lower()
             if x_str == str(target_label).strip().lower():
                 return 0
             elif x_str == str(decoy_label).strip().lower():
