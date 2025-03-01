@@ -144,21 +144,24 @@ def main():
             df_target = df_target.copy()
             # Call pep_regression using the concatenated observations.
             if args.calc_q:
-                df_target["pep"], df_target["est_q"] = pep_processor.pep_regression(
+                pep_series, q_series = pep_processor.pep_regression(
                     obs=df_obs[[args.score_col, args.type_col]].values,
                     method="obs2pep",
                     calc_q=args.calc_q,
                     target_label=args.target_label,
                     decoy_label=args.decoy_label
                 )
+                df_target.loc[:, "pep"] = pd.Series(pep_series, index=df_target.index)
+                df_target.loc[:, "est_q"] = pd.Series(q_series, index=df_target.index)
             else:
-                df_target["pep"] = pep_processor.pep_regression(
+                pep_series = pep_processor.pep_regression(
                     obs=df_obs[[args.score_col, args.type_col]].values,
                     method="obs2pep",
                     calc_q=args.calc_q,
                     target_label=args.target_label,
                     decoy_label=args.decoy_label
                 )
+                df_target.loc[:, "pep"] = pd.Series(pep_series, index=df_target.index)
             # Determine output filename.
             output_path = args.output
             if os.path.isdir(output_path):
