@@ -132,7 +132,7 @@ def main():
         if args.cat_file:
             # Concatenated mode: load single TSV file.
             try:
-                df_obs = pd.read_csv(args.cat_file, sep="\t")
+                df_obs = pd.read_csv(args.cat_file, sep="\t", dtype={args.type_col: str})
             except Exception as e:
                 sys.exit(f"Error reading input concatenated file: {e}")
 
@@ -151,8 +151,8 @@ def main():
                     target_label=args.target_label,
                     decoy_label=args.decoy_label
                 )
-                df_target.loc[:, "pep"] = pd.Series(pep_series, index=df_target.index)
-                df_target.loc[:, "est_q"] = pd.Series(q_series, index=df_target.index)
+                df_target["pep"] = pep_series
+                df_target["est_q"] = q_series
             else:
                 pep_series = pep_processor.pep_regression(
                     obs=df_obs[[args.score_col, args.type_col]].values,
@@ -161,7 +161,7 @@ def main():
                     target_label=args.target_label,
                     decoy_label=args.decoy_label
                 )
-                df_target.loc[:, "pep"] = pd.Series(pep_series, index=df_target.index)
+                df_target["pep"] = pep_series
             # Determine output filename.
             output_path = args.output
             if os.path.isdir(output_path):
