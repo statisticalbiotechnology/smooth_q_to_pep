@@ -14,7 +14,7 @@ Example usage:
      ./main.py q2pep --input example/peptide.target.txt --qcol q-value --pava-method ip --center-method mean --output /data
 
   2) OBS2PEP (a concatenated target and decoy input file):
-     ./main.py obs2pep --cat-file example/peptide.cat.txt --score-col score --type-col type --target_label 0 --decoy_label 1 --output /data
+     ./main.py obs2pep --cat-file example/peptide.cat.txt --score-col score --type-col type --target-label 0 --decoy-label 1 --output /data
 
   3) OBS2PEP (separate target and decoy input files):
      ./main.py obs2pep --target-file example/peptide.target.txt --decoy-file example/peptide.decoy.txt --score-col score --output /data
@@ -141,7 +141,7 @@ def main():
                 sys.exit(f"Columns '{args.score_col}' and/or '{args.type_col}' not found in input file.")
             # Filter targets and decoys.
             df_target = df_obs[df_obs[args.type_col] == args.target_label]
-            df_decoy = df_obs[df_obs[args.type_col] == args.decoy_label]
+            df_target = df_target.copy()
             # Call pep_regression using the concatenated observations.
             if args.calc_q:
                 pep_series, q_series = pep_processor.pep_regression(
