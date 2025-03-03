@@ -6,12 +6,12 @@ permissions:
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - '.github/workflows/pyisopep.yaml'
-      - 'pyIsoPEP/*'
-      - 'example/*'
+  # push:
+  #   branches: [ main ]
+  #   paths:
+    #   - '.github/workflows/pyisopep.yaml'
+    #   - 'pyIsoPEP/*'
+    #   - 'example/*'
 
 jobs:
   build_and_push_image:
