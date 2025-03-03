@@ -260,7 +260,7 @@ class TDCIsotonicPEP(IsotonicRegression):
         Returns:
             A Series of target PEP values aligned with the original order.
         """
-        df_sorted = df_obs.sort_values(by="score", ascending=False).reset_index(drop=True)
+        df_sorted = df_obs.sort_values(by="score", ascending=False, kind="mergesort").reset_index(drop=True)
         pseudo = pd.DataFrame({"score": [np.nan], "label": [0.5]})
         df_aug = pd.concat([pseudo, df_sorted], ignore_index=True)
         y_values = df_aug["label"].values
@@ -274,10 +274,10 @@ class TDCIsotonicPEP(IsotonicRegression):
         # Restore original order.
         if "group" in df_obs.columns:
             df_sorted["orig_idx"] = df_sorted["orig_idx"].astype(int)
-            df_target = df_sorted[df_sorted["group"]=="target"].sort_values(by="orig_idx")
+            df_target = df_sorted[df_sorted["group"]=="target"].sort_values(by="orig_idx", kind="mergesort")
             return df_target["pep"].reset_index(drop=True)
         else:
-            df_result = df_sorted.sort_values(by="orig_idx").reset_index(drop=True)
+            df_result = df_sorted.sort_values(by="orig_idx", kind="mergesort").reset_index(drop=True)
             df_target = df_result[df_result["label"]==0]
             return df_target["pep"]
 
@@ -351,7 +351,7 @@ class IsotonicPEP(TDCIsotonicPEP):
         where pep_array is sorted in ascending order.
 
         Steps:
-          - (a) sort pep_array ascending,
+          - (a) sort pep_array ascending using mergesort,
           - (b) cumsum,
           - (c) divide by rank,
           - (d) restore original order.
@@ -360,7 +360,7 @@ class IsotonicPEP(TDCIsotonicPEP):
             An array of estimated q-values aligned with the input order.
         """
         pep_array = np.array(pep_array, dtype=float)
-        idx_sorted = np.argsort(pep_array)
+        idx_sorted = np.argsort(pep_array, kind="mergesort")
         pep_sorted = pep_array[idx_sorted]
         csum = np.cumsum(pep_sorted)
         ranks = np.arange(1, len(pep_sorted)+1)
@@ -401,7 +401,7 @@ class IsotonicPEP(TDCIsotonicPEP):
         orig_idx = q_series.index.copy()
 
         # Sort q_values in ascending order.
-        q_series_sorted = q_series.sort_values(ascending=True)
+        q_series_sorted = q_series.sort_values(ascending=True, kind="mergesort")
         q_list = q_series_sorted.values.tolist()
         n = len(q_list)
         qn = []
