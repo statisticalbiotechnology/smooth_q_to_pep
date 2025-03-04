@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from scipy.interpolate import PchipInterpolator
 
 # ----------------------------------------------------------------------
 # Base class for isotonic regression in real space.
@@ -113,8 +112,12 @@ class IsotonicRegression:
             Returns the interpolated y-values at xEval (array).
             
             Reference:
-            Fritsch and Carlson, "Monotone Piecewise Cubic Interpolation," 
-            SIAM Journal on Numerical Analysis, 1980.
+            F. N. Fritsch and R. E. Carlson, "Monotone Piecewise Cubic Interpolation" 
+            SIAM Journal on Numerical Analysis, 1980
+            F. N. Fritsch and J. Butland, "A Method for Constructing Local Monotone Piecewise Cubic Interpolants"
+            SIAM Journal on Scientific and Statistical Computing, 1984
+            C. Moler, "Numerical Computing with Matlab" 2004
+            https://epubs.siam.org/doi/epdf/10.1137/1.9780898717952.ch3 Chapter 3.6, Page 14
             
             Parameters:
                 xB: numpy array of shape (m,) with strictly increasing x-coordinates (block centers).
@@ -154,8 +157,8 @@ class IsotonicRegression:
                         d[i] = 0.0
                     else:
                         # Weighted harmonic mean of s[i-1] and s[i]
-                        alpha = (h[i] + h[i-1])
-                        d[i] = alpha / ( (h[i]/s[i-1]) + (h[i-1]/s[i]) )
+                        alpha = 3 * (h[i] + h[i-1])
+                        d[i] = alpha / ( ((2*h[i]+h[i-1])/s[i-1]) + ((h[i]+2*h[i-1])/s[i]) )
 
             # 3) Compute polynomial coefficients for each interval
             # For interval i, define:
@@ -281,151 +284,13 @@ class IsotonicRegression:
         xBlock = np.array(xBlock, dtype=float)
         yBlock = np.array(yBlock, dtype=float)
 
-        # (d) Use Fritsch–Carlson monotonic cubic interpolation on (xBlock, yBlock)
+        # (d) Use Fritsch-Carlson monotonic cubic interpolation on (xBlock, yBlock)
         #     and evaluate at each original x[i].
         y_interp = self.fritsch_carlson_monotonic_interpolate(xBlock, yBlock, x_arr)
 
         # (e) Clamp the result to [min_y, max_y] and return as list.
         y_clamped = np.clip(y_interp, min_y, max_y)
         return y_clamped.tolist()
-
-    def pava_non_decreasing_interpolation_post(self, x, y, center_method="mean", min_y=0.0, max_y=1.0, post_smooth_iterations=20):
-        """
-        Interpolated variant of non-decreasing PAVA, with an optional post-smoothing step.
-        
-        Instead of returning a stepwise-constant output, this returns a piecewise-linear
-        function across block centers, then optionally smooths the final array while
-        preserving monotonicity.
-        
-        Steps:
-        (a) Group the data into extended blocks (each point initially forms a block).
-        (b) Merge adjacent blocks via PAVA.
-        (c) For each final block, compute the x-center based on the specified center_method:
-                - "mean": the average of x values in that block.
-                - "median": the midpoint between the first and last x in the block, i.e., (x[startIdx] + x[endIdx]) / 2.
-        (d) For each point in the block, linearly interpolate between the block's center and the next block's center.
-        (e) Clamp each resulting value to [min_y, max_y].
-        (f) (Optional) Post-smoothing pass to reduce large local jumps while preserving monotonicity.
-        
-        Parameters:
-            x: list of floats, sorted positions.
-            y: list of floats, the data values.
-            center_method: "mean" or "median" for computing the block center (default "mean").
-            min_y: lower bound for clamping (default 0.0).
-            max_y: upper bound for clamping (default 1.0).
-            post_smooth_iterations: int, how many smoothing passes to perform after PAVA
-                                    interpolation (default 0 = no smoothing).
-        
-        Returns:
-            A list of floats representing the interpolated, non-decreasing values, possibly
-            smoothed in a post-processing step.
-        """
-        if len(x) != len(y):
-            raise ValueError("x and y must have the same length.")
-        n = len(y)
-        if n == 0:
-            return []
-
-        # (a) Build an extended block for each point.
-        blocks = []
-        for i in range(n):
-            block = {
-                'sum': y[i],
-                'count': 1,
-                'avg': y[i],
-                'startIdx': i,
-                'endIdx': i
-            }
-            blocks.append(block)
-
-        # (b) Merge blocks using a threshold-based PAVA.
-        stack = []
-        for block in blocks:
-            stack.append(block)
-            while len(stack) > 1:
-                top = stack[-1]
-                sec_top = stack[-2]
-                # Merge if sec_top's avg > top's avg
-                if sec_top['avg'] > top['avg']:
-                    new_sum = sec_top['sum'] + top['sum']
-                    new_count = sec_top['count'] + top['count']
-                    new_avg = new_sum / new_count
-                    sIdx = sec_top['startIdx']
-                    eIdx = top['endIdx']
-                    stack.pop()
-                    stack.pop()
-                    stack.append({
-                        'sum': new_sum,
-                        'count': new_count,
-                        'avg': new_avg,
-                        'startIdx': sIdx,
-                        'endIdx': eIdx
-                    })
-                else:
-                    break
-
-        # (c) Compute the x-center for each final block and store it in the 'sum' field.
-        for block in stack:
-            if center_method == "mean":
-                sum_x = sum(x[i] for i in range(block['startIdx'], block['endIdx'] + 1))
-                length = block['endIdx'] - block['startIdx'] + 1
-                center = sum_x / length
-            elif center_method == "median":
-                center = (x[block['startIdx']] + x[block['endIdx']]) / 2
-            else:
-                raise ValueError("Unknown center_method. Use 'mean' or 'median'.")
-            block['sum'] = center
-
-        # (d) Interpolate each final block's points.
-        result = [0.0] * n
-        for b in range(len(stack)):
-            curBlk = stack[b]
-            curAvg = curBlk['avg']
-            curXc = curBlk['sum']
-
-            if b < len(stack) - 1:
-                nextBlk = stack[b+1]
-                nextAvg = nextBlk['avg']
-                nextXc = nextBlk['sum']
-            else:
-                nextAvg = curAvg
-                nextXc = curXc
-
-            for i in range(curBlk['startIdx'], curBlk['endIdx'] + 1):
-                # If it's the last block or centers are essentially the same, use constant value
-                if b == len(stack)-1 or abs(nextXc - curXc) < 1e-15:
-                    result[i] = curAvg
-                else:
-                    t = (x[i] - curXc) / (nextXc - curXc)
-                    t = max(0.0, min(1.0, t))
-                    result[i] = curAvg + t * (nextAvg - curAvg)
-                # (e) Clamp the result
-                result[i] = min(max(result[i], min_y), max_y)
-
-        # (f) (Optional) Post-smoothing step: local averaging while preserving monotonicity.
-        if post_smooth_iterations > 0:
-            for _ in range(post_smooth_iterations):
-                # Forward pass
-                for i in range(1, n - 1):
-                    # Average with neighbors
-                    new_val = (result[i-1] + result[i] + result[i+1]) / 3.0
-                    # Preserve monotonicity: clamp between neighbors
-                    new_val = max(new_val, result[i-1])
-                    new_val = min(new_val, result[i+1])
-                    # (Optionally clamp to [min_y, max_y] again)
-                    new_val = min(max(new_val, min_y), max_y)
-                    result[i] = new_val
-
-                # Backward pass
-                for i in range(n - 2, 0, -1):
-                    new_val = (result[i-1] + result[i] + result[i+1]) / 3.0
-                    new_val = max(new_val, result[i-1])
-                    new_val = min(new_val, result[i+1])
-                    new_val = min(max(new_val, min_y), max_y)
-                    result[i] = new_val
-
-        return result
-
 
     def pava_non_decreasing_interpolation_linear(self, x, y, center_method="mean", min_y=0.0, max_y=1.0):
         """
