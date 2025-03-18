@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.optimize import lsq_linear
 
 # ----------------------------------------------------------------------
 # Base class for isotonic regression in real space.
@@ -11,7 +12,7 @@ class IsotonicRegression:
     def __init__(self):
         pass
 
-    def pava_non_decreasing(self, values, counts, min_value=0.0, max_value=1.0):
+    def pava_non_decreasing_ok(self, values, counts, min_value=0.0, max_value=1.0):
         """
         Perform standard PAVA (Pool-Adjacent-Violators Algorithm) to enforce a 
         non-decreasing sequence.
@@ -65,6 +66,211 @@ class IsotonicRegression:
             clamped_avg = min(max(block['avg'], min_value), max_value)
             result.extend([clamped_avg] * block['count'])
         return result
+    def custom_lsq_linear_bad(self, A, y, lower_bounds, upper_bounds, max_iter=100, tol=1e-8):
+        """
+        A simplified implementation that mimics the Trust Region Reflective (TRF)
+        algorithm used in SciPy's lsq_linear.
+        
+        This function solves the constrained least squares problem:
+            minimize 0.5 * ||A c - y||^2
+        subject to lower_bounds <= c <= upper_bounds.
+        
+        It uses an active-set strategy:
+        - Start with an initial feasible solution.
+        - At each iteration, identify the "free" variables (those not fixed by the bounds
+            or whose gradient indicates a possibility to move into the feasible interior).
+        - Solve a reduced least-squares problem on the free set.
+        - Compute a step length that keeps the updated solution feasible.
+        - Update the solution until convergence.
+        
+        Parameters:
+            A: numpy array of shape (m, n), design matrix.
+            y: numpy array of shape (m,), target vector.
+            lower_bounds: numpy array of shape (n,), lower bounds.
+            upper_bounds: numpy array of shape (n,), upper bounds.
+            max_iter: maximum number of iterations.
+            tol: tolerance for convergence.
+        
+        Returns:
+            c: numpy array of shape (n,), the solution vector.
+        """
+        m, n = A.shape
+        # Initialize with the zero vector projected into the feasible region.
+        c = np.clip(np.zeros(n), lower_bounds, upper_bounds)
+        
+        for iter in range(max_iter):
+            r = A.dot(c) - y             # Residual: r = A*c - y
+            g = A.T.dot(r)               # Gradient: g = A^T r
+            
+            # Identify free variables:
+            free = []
+            for i in range(n):
+                # If c[i] is strictly between bounds, it's free.
+                if lower_bounds[i] < c[i] < upper_bounds[i]:
+                    free.append(i)
+                # If at lower bound but gradient pushes upward.
+                elif c[i] <= lower_bounds[i] and g[i] > 0:
+                    free.append(i)
+                # If at upper bound but gradient pushes downward.
+                elif c[i] >= upper_bounds[i] and g[i] < 0:
+                    free.append(i)
+                    
+            # If no free variable exists, we are at a local optimum.
+            if len(free) == 0:
+                break
+            
+            # Construct the subproblem on the free set.
+            A_free = A[:, free]
+            # Solve the least-squares subproblem: find delta_free such that
+            #   minimize ||A_free * delta_free + r||^2.
+            # This gives the correction direction for free variables.
+            delta_free, residuals, rank, s = np.linalg.lstsq(A_free, -r, rcond=None)
+            
+            # Build the full delta vector (for non-free variables, delta=0).
+            delta = np.zeros(n)
+            for idx, i in enumerate(free):
+                delta[i] = delta_free[idx]
+            
+            # Compute maximum step length alpha so that c + alpha*delta remains feasible.
+            alpha = 1.0
+            for i in free:
+                if delta[i] > 0:
+                    alpha = min(alpha, (upper_bounds[i] - c[i]) / delta[i])
+                elif delta[i] < 0:
+                    alpha = min(alpha, (lower_bounds[i] - c[i]) / delta[i])
+            
+            # Update the solution and project to ensure numerical feasibility.
+            c_new = c + alpha * delta
+            c_new = np.clip(c_new, lower_bounds, upper_bounds)
+            
+            # Check for convergence.
+            if np.linalg.norm(c_new - c) < tol:
+                c = c_new
+                break
+            c = c_new
+        return c
+    def custom_lsq_linear(self, X, y, lower_bounds, upper_bounds, max_iter=1000, tol=1e-6, alpha_init=1e-3, beta=0.5):
+        """
+        Solve the constrained least squares problem using projection gradient descent with backtracking line search:
+            minimize 0.5 * ||Xc - y||^2
+        subject to lower_bounds <= c <= upper_bounds.
+        
+        Parameters:
+            X: numpy array of shape (N, d), design matrix.
+            y: numpy array of shape (N,), target vector.
+            lower_bounds: numpy array of shape (d,), lower bounds for coefficients.
+            upper_bounds: numpy array of shape (d,), upper bounds for coefficients.
+            max_iter: maximum number of iterations.
+            tol: tolerance for convergence.
+            alpha_init: initial learning rate.
+            beta: factor to reduce alpha if the step is not acceptable.
+            
+        Returns:
+            c: numpy array of shape (d,), the solution vector.
+        """
+        d = X.shape[1]
+        # Start with an initial guess of zeros (which is feasible)
+        c = np.zeros(d)
+        
+        # Objective function: f(c) = 0.5 * ||Xc - y||^2
+        def f(c):
+            return 0.5 * np.linalg.norm(X.dot(c) - y)**2
+        
+        current_val = f(c)
+        alpha = alpha_init
+
+        for iter in range(max_iter):
+            grad = X.T.dot(X.dot(c) - y)  # Compute gradient: X^T (Xc - y)
+            
+            # Backtracking line search to determine a suitable step size
+            while True:
+                c_new = c - alpha * grad
+                # Projection step: enforce lower_bounds <= c_new <= upper_bounds
+                c_new = np.maximum(c_new, lower_bounds)
+                c_new = np.minimum(c_new, upper_bounds)
+                new_val = f(c_new)
+                # Armijo condition: sufficient decrease condition
+                if new_val <= current_val - 1e-4 * alpha * np.dot(grad, grad):
+                    break
+                alpha *= beta  # Reduce step size if condition not met
+
+            # Check convergence
+            if np.linalg.norm(c_new - c) < tol:
+                c = c_new
+                break
+            c = c_new
+            current_val = f(c)
+            # Optionally, reset alpha for next iteration
+            alpha = alpha_init
+
+        return c
+
+    def pava_non_decreasing(self, raw_pep, counts, spline_degree=3, n_knots=5, min_value=0.0, max_value=1.0):
+        """
+        Perform isotonic regression on raw PEP values using an I-Spline basis.
+        
+        This method fits a model of the form:
+            f(x) = c_0 + c_1 I_1(x) + c_2 I_2(x) + ... + c_m I_m(x)
+        where the I-Spline basis functions I_j(x) are constructed on a normalized domain.
+        Non-negative constraints on c_1, ..., c_m ensure that f(x) is monotonic.
+        
+        Parameters:
+            raw_pep: list or array of raw PEP values.
+            center_method: method for centering (currently not used in this implementation).
+            ip_method: additional parameter to choose I-Spline variant (not used in this basic implementation).
+            min_value: lower bound for clamping.
+            max_value: upper bound for clamping.
+            
+        Returns:
+            A list of fitted PEP values with enforced monotonicity.
+        """
+        # Convert raw_pep to numpy array
+        y = np.array(raw_pep)
+        N = len(y)
+        if N == 0:
+            return []
+        
+        # Normalize x positions to [0, 1]
+        x = np.linspace(0, 1, N)
+        
+        # Determine the number of basis functions; here we use at most 10 basis functions
+        m = min(50, N)
+        # Create equally spaced knots in [0, 1]
+        knots = np.linspace(0, 1, m + 1)
+        
+        # Construct the I-Spline basis matrix (degree 1)
+        # For j=0,...,m-1:
+        #   I_j(x) = 0                         if x < knots[j]
+        #            (x - knots[j])/(knots[j+1]-knots[j])   if knots[j] <= x < knots[j+1]
+        #            1                         if x >= knots[j+1]
+        B = np.zeros((N, m))
+        for j in range(m):
+            B[:, j] = np.where(
+                x < knots[j],
+                0.0,
+                np.where(
+                    x >= knots[j+1],
+                    1.0,
+                    (x - knots[j]) / (knots[j+1] - knots[j])
+                )
+            )
+        
+        # Add an intercept column to the design matrix.
+        X = np.column_stack((np.ones(N), B))
+        
+        # Solve the constrained least squares problem:
+        #   minimize ||Xc - y||^2
+        # subject to: c[1:] >= 0 (the intercept c[0] is unconstrained).
+        lower_bounds = np.concatenate(([-np.inf], np.zeros(m)))
+        upper_bounds = np.full(m + 1, np.inf)
+        # res = lsq_linear(X, y, bounds=(lower_bounds, upper_bounds))
+        # c = res.x
+        c = self.custom_lsq_linear(X, y, lower_bounds, upper_bounds)
+        
+        # Compute the fitted values and clamp them to [min_value, max_value]
+        fitted = X.dot(c)
+        fitted = np.clip(fitted, min_value, max_value)
+        return fitted.tolist()
 
     def boundary_derivative_fritsch_carlson(self, xB, s, idx):
         """
@@ -192,8 +398,60 @@ class IsotonicRegression:
                 y_out[i] = c1[seg] + c2[seg]*dx + c3[seg]*(dx**2) + c4[seg]*(dx**3)
 
             return y_out
-
-    def pava_non_decreasing_interpolation(self, x, y, center_method="mean", min_y=0.0, max_y=1.0):
+    
+    def ispline_monotonic_interpolate(self, xB, yB, xEval):
+        """
+        I-spline monotonic interpolation using a cumulative, smooth-step basis.
+        
+        Rather than the piecewise cubic Hermite interpolation (Fritsch-Carlson),
+        this version represents the interpolant as:
+        
+            f(x) = yB[0] + sum_{j=1}^{n-1} (yB[j]-yB[j-1]) * I_j(x),
+        
+        where for each j (with 1 <= j < n) the basis function I_j is defined by:
+        
+            I_j(x) = 0                           if x <= xB[j-1],
+                     3u^2 - 2u^3                  if xB[j-1] < x < xB[j],
+                     1                           if x >= xB[j],
+        
+        with u = (x - xB[j-1]) / (xB[j]-xB[j-1]).
+        
+        This guarantees f(xB[j]) = yB[j] and yields a smooth (C^1) monotone interpolant.
+        
+        Parameters:
+            xB: numpy array of block centers (assumed strictly increasing).
+            yB: numpy array of block averages (monotonic, non-decreasing).
+            xEval: numpy array of x-values at which to evaluate the interpolant.
+        
+        Returns:
+            A numpy array of interpolated values at xEval.
+        """
+        n = len(xB)
+        if n == 0:
+            return np.array([])
+        if n == 1:
+            return np.full_like(xEval, yB[0])
+            
+        # Compute the differences (which are nonnegative due to monotonicity)
+        d = np.diff(yB)
+        
+        # Initialize with the base value.
+        f_interp = np.full_like(xEval, yB[0], dtype=float)
+        
+        # For each interval between block centers, add the smooth cumulative contribution.
+        for j in range(1, n):
+            x_left = xB[j-1]
+            x_right = xB[j]
+            # Compute the normalized variable u; outside the interval u is clipped to 0 or 1.
+            u = (xEval - x_left) / (x_right - x_left)
+            u = np.clip(u, 0, 1)
+            # Smoothstep function: a common cubic that satisfies S(0)=0, S(1)=1, S'(0)=S'(1)=0.
+            I_j = 3 * u**2 - 2 * u**3
+            f_interp += d[j-1] * I_j
+        
+        return f_interp
+    
+    def pava_non_decreasing_interpolation(self, x, y, center_method="mean", min_y=0.0, max_y=1.0, ip_method="pchip"):
         """
         'Interpolated' variant of non-decreasing PAVA using Fritsch-Carlson monotonic cubic interpolation.
         
@@ -286,7 +544,12 @@ class IsotonicRegression:
 
         # (d) Use Fritsch-Carlson monotonic cubic interpolation on (xBlock, yBlock)
         #     and evaluate at each original x[i].
-        y_interp = self.fritsch_carlson_monotonic_interpolate(xBlock, yBlock, x_arr)
+        if ip_method == "pchip":
+            y_interp = self.fritsch_carlson_monotonic_interpolate(xBlock, yBlock, x_arr)
+        elif ip_method == "ispline":
+            y_interp = self.ispline_monotonic_interpolate(xBlock, yBlock, x_arr)
+        else:
+            raise ValueError("Unknown interpolation method. Use 'fritsch' or 'ispline'.")
 
         # (e) Clamp the result to [min_y, max_y] and return as list.
         y_clamped = np.clip(y_interp, min_y, max_y)
@@ -597,7 +860,7 @@ class IsotonicPEP(TDCIsotonicPEP):
             q_est[idx] = q_sorted[i]
         return q_est
 
-    def q_to_pep(self, q_values, smooth=False, pava_method=None, center_method=None):
+    def q_to_pep(self, q_values, smooth=False, pava_method=None, center_method=None, ip_method=None):
         """
         Compute smoothed PEP values from q-values (q2pep).
 
@@ -646,7 +909,7 @@ class IsotonicPEP(TDCIsotonicPEP):
             final_pep = self.pava_non_decreasing(processed, [1]*len(processed))
         elif pava_method == "ip":
             x_positions = list(range(len(processed)))
-            final_pep = self.pava_non_decreasing_interpolation(x_positions, processed, center_method=center_method)
+            final_pep = self.pava_non_decreasing_interpolation(x_positions, processed, center_method=center_method, ip_method=ip_method)
         else:
             raise ValueError("Unknown pava_method. Use 'basic' or 'ip'.")
         
@@ -676,7 +939,7 @@ class IsotonicPEP(TDCIsotonicPEP):
         return self.tdc_binomial_regression(df_obs)
 
     def pep_regression(self, q_values=None, obs=None, target=None, decoy=None, method="q2pep", target_label="target",
-                       decoy_label="decoy", smooth=False, pava_method=None, center_method=None, calc_q=True):
+                       decoy_label="decoy", smooth=False, pava_method=None, center_method=None, calc_q=True, ip_method=None):
         """
         Unified interface for computing PEP values,
         then optionally computing q-values from PEPs.
@@ -701,7 +964,7 @@ class IsotonicPEP(TDCIsotonicPEP):
         if method == "q2pep":
             if q_values is None:
                 raise ValueError("For q2pep, q-values must be provided.")
-            pep_series = self.q_to_pep(q_values=q_values, smooth=smooth, pava_method=pava_method, center_method=center_method)
+            pep_series = self.q_to_pep(q_values=q_values, smooth=smooth, pava_method=pava_method, center_method=center_method, ip_method=ip_method)
             pep_array = pep_series.values
             if not calc_q:
                 return pep_array, None
