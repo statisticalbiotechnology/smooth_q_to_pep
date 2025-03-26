@@ -11,13 +11,13 @@ def parse_args():
         epilog="""
 Example usage:
   1) Q2PEP:
-     ./main.py q2pep --input example/peptide.target.txt --output /data
+     ./main.py q2pep --input ../example/peptide.target.txt --output ../example/results
 
   2) D2PEP (a concatenated target and decoy input file):
-     ./main.py d2pep --cat-file example/peptide.cat.txt --score-col score --type-col type --target-label 0 --decoy-label 1 --output /data
+     ./main.py d2pep --cat-file ../example/peptide.cat.txt --score-col score --type-col type --target-label 0 --decoy-label 1 --output ../example/results
 
   3) D2PEP (separate target and decoy input files):
-     ./main.py d2pep --target-file example/peptide.target.txt --decoy-file example/peptide.decoy.txt --score-col score --output /data
+     ./main.py d2pep --target-file ../example/peptide.target.txt --decoy-file example/peptide.decoy.txt --score-col score --output ../example/results
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -89,8 +89,6 @@ def main():
     # Initialize the IsotonicPEP processor.
     pep_processor = IsotonicPEP(
         regression_algo=args.regression_algo,
-        ip_algo=args.ip_algo,
-        center_method=args.center_method,
         max_iter=args.max_iter
     )
     

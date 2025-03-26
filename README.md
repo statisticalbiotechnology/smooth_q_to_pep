@@ -65,14 +65,14 @@ usage: main.py d2pep [-h] (--cat-file CAT_FILE | --target-file TARGET_FILE) [--d
 ### Running examples with the provided files
 #### 1. q2pep Mode
 ```bash
-$ podman run --rm -it -v .:/data -w /data pyisotonicpep:main q2pep --input /example/peptide.target.txt --output .
+$ podman run --rm -it -v .:/data pyisotonicpep:main q2pep --input /example/peptide.target.txt --output /data
 ```
 #### 2. d2pep Mode
 **2.1 using a concatenated target and decoy input**
 ```bash
-$ podman run --rm -it -v .:/data -w /data pyisotonicpep:main d2pep --cat-file /example/peptide.cat.txt --score-col score --type-col type --target-label 0 --decoy-label 1 --output .
+$ podman run --rm -it -v .:/data pyisotonicpep:main d2pep --cat-file /example/peptide.cat.txt --score-col score --type-col type --target-label 0 --decoy-label 1 --output /data
 ```
 **2.2 using separate target and decoy inputs**
 ```bash
-$ podman run --rm -it -v .:/data -w /data pyisotonicpep:main d2pep --target-file /example/peptide.target.txt --decoy-file /example/peptide.decoy.txt --score-col score --output .
+$ podman run --rm -it -v .:/data pyisotonicpep:main d2pep --target-file /example/peptide.target.txt --decoy-file /example/peptide.decoy.txt --score-col score --output /data
 ```
