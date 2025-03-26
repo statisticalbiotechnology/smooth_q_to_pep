@@ -14,21 +14,36 @@ DEFAULT_TOL = 1e-6        # Default tolerance for convergence.
 # This class implements methods for enforcing a non-decreasing constraint 
 # on a sequence of values. It provides:
 #
-#   - pava_non_decreasing(): The standard Pool-Adjacent-Violators Algorithm 
-#                            (PAVA) for stepwise constant regression.
+# Regression:
 #
-#   - pava_non_decreasing_interpolation(): A variant that performs I-Spline 
-#                            interpolation between PAVA-derived block centers 
-#                            to yield a smooth monotonic cubic spline.
+#   - pava_non_decreasing():
+#       Implements the standard Pool-Adjacent-Violators Algorithm (PAVA)
+#       for stepwise-constant isotonic regression.
 #
-#   - ispline_non_decreasing(): Performs I-Spline monotonic regression on a 
-#                               given sequence.
+#   - ispline_non_decreasing():
+#       Performs I-Spline-based monotonic regression on a given sequence.
 #
-#   - constrained_least_squares(): A helper method using FISTA for solving 
-#                                  constrained least squares problems.
+#   - constrained_least_squares():
+#       A helper method using FISTA to solve constrained least squares 
+#       problems.
 #
-#   - ispline_monotonic_interpolate(): Implements I-Spline based monotonic 
-#                                     interpolation.
+# Interpolation:
+#
+#   - pava_non_decreasing_interpolation():
+#       A variant that performs I-Spline or Fritsch-Carlson interpolation 
+#       between PAVA-derived block centers to produce a smooth, monotonic 
+#       cubic spline.
+#
+#   - ispline_monotonic_interpolate():
+#       Performs monotonic interpolation using I-Splines.
+#
+#   - fritsch_carlson_monotonic_interpolate():
+#       Performs monotonic interpolation using Fritsch-Carlson monotonic 
+#       cubic interpolation (PCHIP).
+#
+#   - boundary_derivative_fritsch_carlson():
+#       Computes the boundary derivatives used in Fritsch-Carlson 
+#       interpolation to maintain monotonicity at endpoints.
 # =============================================================================
 class IsotonicRegression:
     def __init__(self):
@@ -424,7 +439,7 @@ class IsotonicRegression:
     def pava_non_decreasing_interpolation(self, x, y, ip_algo="ispline", center_method="mean", min_y=0.0, max_y=1.0):
         """
         Computes a smooth, non-decreasing interpolation using a variant of PAVA with
-        I-Spline monotonic cubic interpolation.
+        I-Spline or Fritsch-Carlson monotonic cubic interpolation.
         
         Steps:
         (a) Group the data into extended blocks (each point initially forms a block).
@@ -434,7 +449,7 @@ class IsotonicRegression:
                 - "median": the midpoint between the first and last x in the block, 
                             i.e., (x[startIdx] + x[endIdx]) / 2.
         (d) Collect these (xBlock, yBlock) points and build a monotonic cubic interpolant 
-            using I-Spline method.
+            using I-Spline or Fritsch-Carlson method.
         (e) Evaluate this spline at each original x[i] and clamp the results to [min_y, max_y].
         
         Parameters:
@@ -442,6 +457,8 @@ class IsotonicRegression:
                             Sorted positions.
             y             : list of floats
                             Data values.
+            ip_algo       : str, optional (default="ispline")
+                            Interpolation algorithm to use on block centers; "ispline" or "pchip".
             center_method : str, optional (default="mean")
                             Method for computing the block center; "mean" or "median".
             min_y         : float, optional (default=0.0)
@@ -721,6 +738,9 @@ class IsotonicPEP(TDCIsotonicPEP):
                              Regression method ("PAVA" or "ispline").
             ip            : bool, optional (default=False)
                              If True and using PAVA, perform interpolation.
+            ip_algo       : str, optional
+                             interpolation algorithm to use on block centers;
+                             defaults to self.ip_algo.
             center_method : str, optional
                              Method for computing block centers; defaults to self.center_method.
             max_iter      : int, optional (default=DEFAULT_MAX_ITER)
@@ -827,11 +847,14 @@ class IsotonicPEP(TDCIsotonicPEP):
             method         : str, optional (default="q2pep")
                              Either "q2pep" or "d2pep".
             regression_algo: str, optional (default="ispline")
-                             Regression method.
+                             Regression algorithm to use ("PAVA" or "ispline").
             max_iter       : int, optional (default=DEFAULT_MAX_ITER)
                              Maximum iterations.
             ip             : bool, optional (default=False)
                              If True and using PAVA for q2pep, apply interpolation.
+            ip_algo       : str, optional
+                             interpolation algorithm to use on block centers;
+                             defaults to self.ip_algo.
             center_method  : str, optional
                              Method for computing block centers; defaults to self.center_method.
             calc_q         : bool, optional (default=True)

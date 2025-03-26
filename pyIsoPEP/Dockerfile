@@ -6,7 +6,7 @@ WORKDIR /app
 COPY pyIsoPEP/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY pyIsoPEP/ ./
-COPY example/ ./example/
+COPY example/ /example/
 
 # Set the entrypoint to run the main script.
 # This will allow users to pass CLI arguments directly.
