@@ -166,3 +166,4 @@ output/*
 output_latest
 figs/*.png
 *simplified*
+pyiso_test/*
