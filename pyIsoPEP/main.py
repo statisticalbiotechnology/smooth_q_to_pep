@@ -230,16 +230,15 @@ def main():
                     calc_q=args.calc_q
                 )
                 df_target["pep"] = pep_series
-            # Create output directory if it does not exist.
-            output_dir = args.output
-            if not os.path.isdir(output_dir):
-                os.makedirs(output_dir, exist_ok=True)
-            target_out = os.path.join(output_dir, "outputPEP.target.dbased.txt")
+            # Determine output filename.
+            output_path = args.output
+            if os.path.isdir(output_path):
+                output_path = os.path.join(output_path, "outputPEP.target.dbased.txt")
             try:
-                df_target.to_csv(target_out, sep="\t", index=False)
-                print(f"Target output saved to: {target_out}")
+                df_target.to_csv(output_path, sep="\t", index=False)
+                print(f"Target output saved to: {output_path}")
             except Exception as e:
-                sys.exit(f"Error writing output files: {e}")
+                sys.exit(f"Error writing output file: {e}")
     else:
         sys.exit("Unknown method. Use 'q2pep' or 'd2pep'.")
 
