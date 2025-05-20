@@ -21,20 +21,20 @@ OUTPUT_DIR="$2/$3/run$4"
 WORK_DIR="/proj/proteoforma_nsc/smooth_q_to_pep"
 
 # Define base directories
-INTERM_DIR="$WORK_DIR/preparation/interm"
+INTERM_DIR="$WORK_DIR/preparation/$3/run$4/interm"
 MASTER_DIR="$WORK_DIR/$OUTPUT_DIR/irls"
 QPAVA_DIR="$WORK_DIR/$OUTPUT_DIR/pava.rank"
 QISPLINE_DIR="$WORK_DIR/$OUTPUT_DIR/ispline.rank"
 DPAVA_DIR="$WORK_DIR/$OUTPUT_DIR/pava.score"
 DISPLINE_DIR="$WORK_DIR/$OUTPUT_DIR/ispline.score"
 DATA_OUTPUT_DIR="/data/$OUTPUT_DIR"
-DATA_INTERM_DIR="/data/preparation/interm"
+DATA_INTERM_DIR="/data/preparation/$3/run$4/interm"
 
 cd "$WORK_DIR" || { echo "Cannot change to directory $WORK_DIR"; exit 1; }
 # Create necessary directories
 mkdir -p "$2" "$2/$3" "$OUTPUT_DIR" "$QPAVA_DIR" "$QISPLINE_DIR" "$DPAVA_DIR" "$DISPLINE_DIR"
 
-cp -r "$WORK_DIR/preparation/irls" "$WORK_DIR/$OUTPUT_DIR"
+cp -r "$WORK_DIR/preparation/$3/run$4/irls" "$WORK_DIR/$OUTPUT_DIR"
 
 for KNOCKING_OUT_NUM in 0 "${KNOCKING_OUT_NUM_LIST[@]}"; do
     CURRENT_MASTER_DIR="$MASTER_DIR/$KNOCKING_OUT_NUM"
