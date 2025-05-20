@@ -59,7 +59,7 @@ def main():
     
     ### Part 2: Calculate metrics and generate plots
     # Directory where the input files for plotting are located
-    base_dir = "perc_test"
+    base_dir = "/proj/proteoforma_nsc/smooth_q_to_pep/perc_test"
     # Define two groups of models (for rank-based and score-based comparisons)
     groupA = ["irls", "pava.rank", "ispline.rank"]
     groupB = ["irls", "pava.score", "ispline.score"]

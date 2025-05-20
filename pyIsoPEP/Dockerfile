@@ -10,4 +10,4 @@ COPY example/ /example/
 
 # Set the entrypoint to run the main script.
 # This will allow users to pass CLI arguments directly.
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python", "/app/main.py"]
