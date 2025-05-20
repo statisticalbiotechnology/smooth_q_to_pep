@@ -5,8 +5,55 @@ from scipy.optimize import lsq_linear
 # =============================================================================
 # Module-Level Default Parameters
 # =============================================================================
-DEFAULT_MAX_ITER = 5000   # Default maximum iterations for iterative solvers.
-DEFAULT_TOL = 1e-6        # Default tolerance for convergence.
+DEFAULT_MAX_ITER = 5000     # Default maximum iterations for iterative solvers.
+DEFAULT_TOL = 1e-6          # Default tolerance for convergence.
+DEFAULT_NUM_BINS = 10000    # hard cap after adaptive binning
+DEFAULT_SKEW_FACTOR = 0.75  # <1 --> knots left-biased
+DEFAULT_LAMBDA = 1e-6       # ridge penalty
+EARLY_WEIGHT_FACTOR = 1.0   # 0 = off, 1 = linear boost towards top scores
+
+
+# =============================================================================
+# PreProcessing Class: Handle observation input and optionally compute FDRs and 
+# q-values from target and decoy observations.
+# =============================================================================
+class PreProcessing:
+    def process_obs(self, obs):
+        """
+        Build a DataFrame with columns:
+          - score: float
+          - label: 0 (target) or 1 (decoy)
+          - orig_idx: original row index for order restoration
+        """
+        if not isinstance(obs, np.ndarray) or obs.ndim != 2 or obs.shape[1] != 2:
+            raise ValueError("Input observations obs must be a numpy array with shape (n, 2).")
+        scores = obs[:, 0].astype(float)
+        labels = obs[:, 1].astype(int)
+        if not set(np.unique(labels)).issubset({0, 1}):
+            raise ValueError("Labels must be 0 (target) or 1 (decoy)")
+        df = pd.DataFrame({"score": scores, "label": labels})
+        df["orig_idx"] = np.arange(len(df))
+        return df
+
+    def calc_q_from_fdr(self, obs):
+        """
+        Compute FDRs and q-values from target and decoy observations.
+        Returns a tuple of two pandas Series (FDR, q-value) aligned to original order.
+        """
+        df = self.process_obs(obs)
+        df_sorted = df.sort_values(by="score", ascending=False, kind="mergesort").reset_index(drop=True)
+        df_sorted["cumulative_target"] = (df_sorted["label"] == 0).cumsum()
+        df_sorted["cumulative_decoy"] = (df_sorted["label"] == 1).cumsum()
+        df_sorted["FDR"] = (df_sorted["cumulative_decoy"] + 0.5) / df_sorted["cumulative_target"]
+
+        q = df_sorted["FDR"].values.copy()
+        for i in range(len(q) - 2, -1, -1):
+            q[i] = min(q[i], q[i + 1])
+        df_sorted["q-value"] = q
+        # align both to original order
+        df_result = df_sorted.sort_values("orig_idx").reset_index(drop=True)
+        return df_result["FDR"], df_result["q-value"]
+
 
 # =============================================================================
 # Base Class for Isotonic Regression in Real Space
@@ -178,7 +225,38 @@ class IsotonicRegression:
                 break
         return c
     
-    def ispline_non_decreasing(self, raw_pep, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER):
+    def bin_data(self, x, y, max_bins=DEFAULT_NUM_BINS):
+        """
+        Adaptive equal-size binning.
+        Returns x_bin, y_bin, weight (counts).
+        """
+        n = len(x)
+        if n == 0 or max_bins <= 0:
+            return np.array([]), np.array([]), np.array([])
+
+        target_size = n / max_bins
+        threshold = target_size
+        start = 0
+
+        x_out, y_out, w_out = [], [], []
+
+        for i in range(n):
+            if (i + 1 >= threshold) or (i == n - 1):
+                end = i + 1  # exclusive
+                size = end - start
+                x_avg = x[start: end].mean()
+                y_avg = y[start: end].mean()
+
+                x_out.append(x_avg)
+                y_out.append(y_avg)
+                w_out.append(size)
+
+                start = end
+                threshold += target_size
+
+        return (np.asarray(x_out), np.asarray(y_out), np.asarray(w_out, dtype=float))
+
+    def ispline_non_decreasing(self, raw_pep, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER, skew_factor=DEFAULT_SKEW_FACTOR, max_bins=DEFAULT_NUM_BINS, ridge_lambda=DEFAULT_LAMBDA, early_weight_factor=EARLY_WEIGHT_FACTOR):
         """
         Performs I-Spline based isotonic regression on raw PEP values.
         
@@ -197,10 +275,21 @@ class IsotonicRegression:
                         Upper bound for clamping the fitted values.
             max_iter  : int, optional (default=DEFAULT_MAX_ITER)
                         Maximum iterations for the constrained least squares solver.
+            skew_factor : float
+                        < 1 pushes knots towards the low-score end; > 1 towards high scores.
+            max_bins : int
+                        Upper bound on the number of bins produced by the adaptive binning.
+            max_knots : int
+                        Upper cap on the number of spline intervals (k).
+            ridge_lambda : float
+                        Small ℓ² regularization term λ.
+            early_weight_factor : float in [0, inf)
+                        0  : no extra emphasis;  
+                        1  : linear down-weighting from first to last bin.
 
         Returns:
             list of floats:
-                The fitted PEP values (clamped between min_value and max_value).
+                The fitted monotone PEP values (clamped between min_value and max_value).
         """
         # Convert raw_pep to numpy array
         y = np.array(raw_pep)
@@ -208,58 +297,96 @@ class IsotonicRegression:
         if N == 0:
             return []
         
-        # Normalize x positions to [0, 1]
+        # 1. Prepare binned representation (speeds up regression)
+        # Normalize x positions to [0, 1] and perform adaptive binning
         x = np.linspace(0, 1, N)
-        
-        # Determine the number of basis functions.
-        # Here we choose m as the integer square root of N (with an upper cap if desired).
-        m = int(np.sqrt(N))
-        # Create equally spaced knots in [0, 1]
-        knots = np.linspace(0, 1, m + 1)
-        # quantiles = np.linspace(0, 1, m + 1)
-        # knots = np.quantile(x, quantiles)
+        x_bin, y_bin, w_bin = self.bin_data(x, y, max_bins=max_bins)
+        n_bin = len(x_bin)
 
-        # Construct the cubic I-Spline basis matrix.
+        # Emphasise early bins (optional)
+        if early_weight_factor > 0.0 and n_bin > 1:
+            scale = 1.0 + early_weight_factor * (n_bin - 1 - np.arange(n_bin)) / (n_bin - 1)
+            w_bin *= scale
+
+        # 2. Construct I‑Spline design matrix
+        k = int(np.sqrt(n_bin))
+        # compute adaptive knots and build knot vector
+        # total knots = k + 1  (including the two ends)
+        knots = [x_bin[0]]
+        for i in range(1, k):
+            q = 1.0 - (1.0 - i / k) ** skew_factor      # double q = 1 - pow(...)
+            idx = int(round(q * (n_bin - 1)))                 # size_t idx = q*(x.size()-1)
+            knots.append(x_bin[idx])
+        knots.append(x_bin[-1])
+        knots = np.asarray(knots)
+        m = len(knots) - 1        # number of basis functions (intervals)
+
+        # Construct the cubic I-Spline basis matrix for binned data.
         # For each interval [knots[j], knots[j+1]], define:
         #    I_j(x) = 0                         if x < knots[j],
         #             3u^2 - 2u^3               if knots[j] <= x < knots[j+1],
         #             1                         if x >= knots[j+1],
         # where u = (x - knots[j]) / (knots[j+1] - knots[j]).
-        B = np.zeros((N, m))
+        B = np.zeros((n_bin, m))
         for j in range(m):
             # Compute the normalized coordinate u.
-            u = (x - knots[j]) / (knots[j+1] - knots[j])
-            # Ensure u is in [0, 1].
+            u = (x_bin - knots[j]) / (knots[j + 1] - knots[j])
             u = np.clip(u, 0, 1)
             B[:, j] = np.where(
-                x < knots[j],
+                x_bin < knots[j],
                 0.0,
                 np.where(
-                    x >= knots[j+1],
+                    x_bin >= knots[j+1],
                     1.0,
                     3 * u**2 - 2 * u**3
                 )
             )
         # Add an intercept column to the design matrix.
-        X = np.column_stack((np.ones(N), B))
+        X = np.column_stack((np.ones(n_bin), B))
+        # apply weights  (W½ = sqrt(w))
+        w_sqrt = np.sqrt(w_bin)
+        Xw = X * w_sqrt[:, None]
+        yw = y_bin * w_sqrt
+
+        # Ridge augmentation: add ridge rows  (√λ I, 0)
+        p = X.shape[1]            # = m + 1 parameters
+        X_aug = np.vstack([Xw, np.sqrt(ridge_lambda) * np.eye(p)])
+        y_aug = np.concatenate([yw, np.zeros(p)])
         
         # Solve the constrained least squares problem:
-        #   minimize ||Xc - y||^2
-        # subject to: c[1:] >= 0 (the intercept c[0] is unconstrained).
+        # minimize ||Xc - y||^2
+        # subject to: c[1: ] >= 0 (the intercept c[0] is unconstrained).
         lower_bounds = np.concatenate(([-np.inf], np.zeros(m)))
-        upper_bounds = np.full(m + 1, np.inf)
-        res = lsq_linear(X, y, bounds=(lower_bounds, upper_bounds))
+        # upper_bounds = np.full(m + 1, np.inf)
+        upper_bounds = np.full(p, np.inf)
+        res = lsq_linear(X_aug, y_aug, bounds=(lower_bounds, upper_bounds))
         c = res.x
-        # c = self.constrained_least_squares(X, y, lower_bounds, upper_bounds, max_iter=max_iter)
+        # c = self.constrained_least_squares(X_aug, y_aug, lower_bounds, upper_bounds, max_iter=max_iter)
         
+        # 3. Evaluate fitted spline on original x grid
+        # build same basis but on x_full
+        B_full = np.zeros((N, m))
+        for j in range(m):
+            u = (x - knots[j]) / (knots[j + 1] - knots[j])
+            u = np.clip(u, 0.0, 1.0)
+            B_full[:, j] = np.where(
+                x < knots[j],
+                0.0,
+                np.where(x >= knots[j + 1],
+                        1.0,
+                        3 * u ** 2 - 2 * u ** 3)
+            )
+        
+        X_full = np.column_stack((np.ones(N), B_full))
+
         # Compute the fitted values and clamp them to [min_value, max_value]
-        fitted = X.dot(c)
+        fitted = X_full @ c
         fitted = np.clip(fitted, min_value, max_value)
         return fitted.tolist()
     
     def ispline_monotonic_interpolate(self, xB, yB, xEval):
         """
-       Performs I-Spline monotonic interpolation using a cumulative smooth-step basis.
+        Performs I-Spline monotonic interpolation using a cumulative smooth-step basis.
         
         The interpolant is represented as:
             f(x) = yB[0] + sum_{j=1}^{n-1} (yB[j]-yB[j-1]) * I_j(x),    
@@ -348,94 +475,94 @@ class IsotonicRegression:
             return dN
 
     def fritsch_carlson_monotonic_interpolate(self, xB, yB, xEval):
-            """
-            Fritsch-Carlson monotonic cubic interpolation for a strictly increasing
-            sequence xB with corresponding yB (non-decreasing).
-            
-            Returns the interpolated y-values at xEval (array).
-            
-            Reference:
-            F. N. Fritsch and R. E. Carlson, "Monotone Piecewise Cubic Interpolation" 
-            SIAM Journal on Numerical Analysis, 1980
-            F. N. Fritsch and J. Butland, "A Method for Constructing Local Monotone Piecewise Cubic Interpolants"
-            SIAM Journal on Scientific and Statistical Computing, 1984
-            C. Moler, "Numerical Computing with Matlab" 2004
-            https://epubs.siam.org/doi/epdf/10.1137/1.9780898717952.ch3 Chapter 3.6, Page 14
-            
-            Parameters:
-                xB: numpy array of shape (m,) with strictly increasing x-coordinates (block centers).
-                yB: numpy array of shape (m,) with non-decreasing y-coordinates (block averages).
-                xEval: numpy array of x-values at which we want to evaluate.
+        """
+        Fritsch-Carlson monotonic cubic interpolation for a strictly increasing
+        sequence xB with corresponding yB (non-decreasing).
+        
+        Returns the interpolated y-values at xEval (array).
+        
+        Reference:
+        F. N. Fritsch and R. E. Carlson, "Monotone Piecewise Cubic Interpolation" 
+        SIAM Journal on Numerical Analysis, 1980
+        F. N. Fritsch and J. Butland, "A Method for Constructing Local Monotone Piecewise Cubic Interpolants"
+        SIAM Journal on Scientific and Statistical Computing, 1984
+        C. Moler, "Numerical Computing with Matlab" 2004
+        https://epubs.siam.org/doi/epdf/10.1137/1.9780898717952.ch3 Chapter 3.6, Page 14
+        
+        Parameters:
+            xB: numpy array of shape (m,) with strictly increasing x-coordinates (block centers).
+            yB: numpy array of shape (m,) with non-decreasing y-coordinates (block averages).
+            xEval: numpy array of x-values at which we want to evaluate.
 
-            Returns:
-                A numpy array of interpolated values at each xEval.
-            """
-            m = len(xB)
-            if m == 0:
-                return np.array([])
-            if m == 1:
-                # Only one block => constant function
-                return np.full_like(xEval, yB[0])
+        Returns:
+            A numpy array of interpolated values at each xEval.
+        """
+        m = len(xB)
+        if m == 0:
+            return np.array([])
+        if m == 1:
+            # Only one block => constant function
+            return np.full_like(xEval, yB[0])
 
-            # 1) Compute slopes between consecutive points
-            h = xB[1:] - xB[:-1]          # interval lengths
-            s = (yB[1:] - yB[:-1]) / h    # slopes
+        # 1) Compute slopes between consecutive points
+        h = xB[1:] - xB[:-1]          # interval lengths
+        s = (yB[1:] - yB[:-1]) / h    # slopes
 
-            # 2) Compute initial derivatives at each xB[i] (d[i])
-            d = np.zeros(m, dtype=float)
+        # 2) Compute initial derivatives at each xB[i] (d[i])
+        d = np.zeros(m, dtype=float)
 
-            # Handle the simple case m=2 directly
-            if m == 2:
-                d[0] = s[0]
-                d[1] = s[0]
-            else:
-                # More than two points => boundary derivatives
-                d[0]   = self.boundary_derivative_fritsch_carlson(xB, s, idx=0)
-                d[m-1] = self.boundary_derivative_fritsch_carlson(xB, s, idx=m-1)
+        # Handle the simple case m=2 directly
+        if m == 2:
+            d[0] = s[0]
+            d[1] = s[0]
+        else:
+            # More than two points => boundary derivatives
+            d[0]   = self.boundary_derivative_fritsch_carlson(xB, s, idx=0)
+            d[m-1] = self.boundary_derivative_fritsch_carlson(xB, s, idx=m-1)
 
-                # Interior derivatives
-                for i in range(1, m-1):
-                    if s[i-1] * s[i] <= 0:
-                        # If slopes change sign or one is zero, derivative is 0 to preserve monotonicity
-                        d[i] = 0.0
-                    else:
-                        # Weighted harmonic mean of s[i-1] and s[i]
-                        alpha = 3 * (h[i] + h[i-1])
-                        d[i] = alpha / ( ((2*h[i]+h[i-1])/s[i-1]) + ((h[i]+2*h[i-1])/s[i]) )
+            # Interior derivatives
+            for i in range(1, m-1):
+                if s[i-1] * s[i] <= 0:
+                    # If slopes change sign or one is zero, derivative is 0 to preserve monotonicity
+                    d[i] = 0.0
+                else:
+                    # Weighted harmonic mean of s[i-1] and s[i]
+                    alpha = 3 * (h[i] + h[i-1])
+                    d[i] = alpha / ( ((2*h[i]+h[i-1])/s[i-1]) + ((h[i]+2*h[i-1])/s[i]) )
 
-            # 3) Compute polynomial coefficients for each interval
-            # For interval i, define:
-            #   c1 = yB[i]
-            #   c2 = d[i]
-            #   c3 = (3*s[i] - 2*d[i] - d[i+1]) / h[i]
-            #   c4 = (d[i] + d[i+1] - 2*s[i]) / (h[i]^2)
-            c1 = yB[:-1]
-            c2 = d[:-1]
-            c3 = np.zeros(m-1, dtype=float)
-            c4 = np.zeros(m-1, dtype=float)
+        # 3) Compute polynomial coefficients for each interval
+        # For interval i, define:
+        #   c1 = yB[i]
+        #   c2 = d[i]
+        #   c3 = (3*s[i] - 2*d[i] - d[i+1]) / h[i]
+        #   c4 = (d[i] + d[i+1] - 2*s[i]) / (h[i]^2)
+        c1 = yB[:-1]
+        c2 = d[:-1]
+        c3 = np.zeros(m-1, dtype=float)
+        c4 = np.zeros(m-1, dtype=float)
 
-            for i in range(m-1):
-                d_i   = d[i]
-                d_ip1 = d[i+1]
-                s_i   = s[i]
-                hi    = h[i]
-                c3[i] = (3*s_i - 2*d_i - d_ip1) / hi
-                c4[i] = (d_i + d_ip1 - 2*s_i) / (hi**2)
+        for i in range(m-1):
+            d_i   = d[i]
+            d_ip1 = d[i+1]
+            s_i   = s[i]
+            hi    = h[i]
+            c3[i] = (3*s_i - 2*d_i - d_ip1) / hi
+            c4[i] = (d_i + d_ip1 - 2*s_i) / (hi**2)
 
-            # 4) Evaluate piecewise polynomial at each xEval
-            y_out = np.zeros_like(xEval, dtype=float)
+        # 4) Evaluate piecewise polynomial at each xEval
+        y_out = np.zeros_like(xEval, dtype=float)
 
-            # For each xEval, find interval via binary search
-            idxs = np.searchsorted(xB, xEval) - 1
-            idxs = np.clip(idxs, 0, m-2)  # valid range for intervals
+        # For each xEval, find interval via binary search
+        idxs = np.searchsorted(xB, xEval) - 1
+        idxs = np.clip(idxs, 0, m-2)  # valid range for intervals
 
-            for i in range(len(xEval)):
-                seg = idxs[i]
-                dx = xEval[i] - xB[seg]
-                y_out[i] = c1[seg] + c2[seg]*dx + c3[seg]*(dx**2) + c4[seg]*(dx**3)
+        for i in range(len(xEval)):
+            seg = idxs[i]
+            dx = xEval[i] - xB[seg]
+            y_out[i] = c1[seg] + c2[seg]*dx + c3[seg]*(dx**2) + c4[seg]*(dx**3)
 
-            return y_out
-
+        return y_out
+    
     def pava_non_decreasing_interpolation(self, x, y, ip_algo="ispline", center_method="mean", min_y=0.0, max_y=1.0):
         """
         Computes a smooth, non-decreasing interpolation using a variant of PAVA with
@@ -532,9 +659,9 @@ class IsotonicRegression:
 
         # (d) Use I-Spline monotonic cubic interpolation on (xBlock, yBlock)
         #     and evaluate at each original x[i].
-        if ip_algo=="ispline":
+        if ip_algo == "ispline":
             y_interp = self.ispline_monotonic_interpolate(xBlock, yBlock, x_arr)
-        elif ip_algo=="pchip":
+        elif ip_algo == "pchip":
             y_interp = self.fritsch_carlson_monotonic_interpolate(xBlock, yBlock, x_arr)
         else:
             raise ValueError("Unknown ip_algo. Use 'ispline' or 'pchip'.")
@@ -542,90 +669,17 @@ class IsotonicRegression:
         # (e) Clamp the result to [min_y, max_y] and return as list.
         y_clamped = np.clip(y_interp, min_y, max_y)
         return y_clamped.tolist()
+    
 
 # =============================================================================
 # TDCIsotonicPEP Class: Regression for Target-Decoy Competition Data
-# -----------------------------------------------------------------------------
-# Inherits from IsotonicRegression and implements methods to process binary 
-# observations (target vs. decoy) and to compute posterior error probabilities (PEP)
-# using isotonic regression.
 # =============================================================================
 class TDCIsotonicPEP(IsotonicRegression):
     def __init__(self, regression_algo="ispline", max_iter=DEFAULT_MAX_ITER):
         self.regression_algo = regression_algo
         self.max_iter = max_iter
-    
-    def process_obs(self, target=None, decoy=None, obs=None, target_label="target", decoy_label="decoy"):
-        """
-        Process observation data for d2pep.
 
-        Acceptable inputs:
-          - If obs is provided:
-              * a numpy array (2D) with at least 2 columns.
-              * a tuple; the two arrays must have the same length.
-              * a DataFrame, it must contain the score and type columns.
-          - Otherwise, if target and decoy are provided separately, they are used.
-        
-        Returns:
-            A DataFrame with columns 'score' and 'label' (0 for target, 1 for decoy) and an "orig_idx" column preserving the original order.
-            In the case of separate inputs, a "group" column is added ("target" or "decoy").
-        """
-        def convert_label(x, target_label, decoy_label):
-            """
-            Convert the type values in the observation data to numeric values
-            based on the provided target_label and decoy_label.
-            """
-            try:
-                # Convert x to float, then to int, then to string.
-                x_str = str(int(float(x)))
-            except Exception:
-                # Fallback: use the original string representation (trimmed and lowercased)
-                x_str = str(x).strip().lower()
-            if x_str == str(target_label).strip().lower():
-                return 0
-            elif x_str == str(decoy_label).strip().lower():
-                return 1
-            else:
-                raise ValueError("Invalid label: " + str(x))
-            
-        if obs is not None:
-            if isinstance(obs, np.ndarray):
-                if obs.ndim == 2 and obs.shape[1] >= 2:
-                    df = pd.DataFrame(obs, columns=["score", "label"])
-                else:
-                    raise ValueError("The numpy array for obs must be 2D with at least 2 columns.")
-            elif isinstance(obs, (list, tuple)):
-                arr1 = np.array(obs[0])
-                arr2 = np.array(obs[1])
-                if len(arr1) != len(arr2):
-                    raise ValueError("For concatenated input, the two arrays must have the same length.")
-                df = pd.DataFrame({"score": arr1, "label": arr2})
-            elif isinstance(obs, pd.DataFrame):
-                df = obs.copy()
-                df = df.rename(columns={df.columns[0]: "score", df.columns[1]: "label"})
-            else:
-                raise ValueError("obs must be a numpy array, tuple, or DataFrame.")
-            df["label"] = df["label"].apply(lambda x: convert_label(x, target_label, decoy_label))
-        else:
-            if target is not None and decoy is not None:
-                df_target = pd.DataFrame({"score": np.array(target).astype(float)})
-                df_target["label"] = 0
-                df_target["group"] = "target"
-                df_decoy = pd.DataFrame({"score": np.array(decoy).astype(float)})
-                df_decoy["label"] = 1
-                df_decoy["group"] = "decoy"
-                df = pd.concat([df_target, df_decoy], ignore_index=True)
-            else:
-                raise ValueError("For obs2pep, provide either obs or both target and decoy.")
-            
-        # Preserve original order.
-        if "group" in df.columns:
-            df["orig_idx"] = df.groupby("group").cumcount()
-        else:
-            df["orig_idx"] = np.arange(len(df))
-        return df
-
-    def tdc_binomial_regression(self, df_obs, regression_algo="ispline", max_iter=None):
+    def tdc_binomial_regression(self, df_obs, regression_algo=None, max_iter=None):
         """
         Compute PEP values from observation data using isotonic regression.
         
@@ -646,19 +700,18 @@ class TDCIsotonicPEP(IsotonicRegression):
                              Maximum iterations for the regression; if None, uses the object's default.
 
         Returns:
-            pandas.Series:
-                A Series of target PEP values aligned with the original order.
+            pandas.Series: A Series of target PEP values aligned with the original order.
         """
-        if max_iter is None:
-            max_iter = self.max_iter
-        
+        regression_algo = regression_algo or self.regression_algo
+        max_iter = max_iter or self.max_iter
+
         df_sorted = df_obs.sort_values(by="score", ascending=False, kind="mergesort").reset_index(drop=True)
         pseudo = pd.DataFrame({"score": [np.nan], "label": [0.5]})
         df_aug = pd.concat([pseudo, df_sorted], ignore_index=True)
         y_values = df_aug["label"].values
-        if regression_algo == "PAVA":
+        if self.regression_algo == "PAVA":
             fitted = self.pava_non_decreasing(list(y_values), [1] * len(y_values))
-        elif regression_algo == "ispline":
+        elif self.regression_algo == "ispline":
             fitted = self.ispline_non_decreasing(list(y_values), max_iter=max_iter)
         else:
             raise ValueError("Unknown regression_algo. Use 'PAVA' or 'ispline'.")
@@ -668,35 +721,25 @@ class TDCIsotonicPEP(IsotonicRegression):
         with np.errstate(divide='ignore', invalid='ignore'):
             pep = fitted_decoy_prob / (1 - fitted_decoy_prob)
             pep = np.clip(pep, 0, 1)
-        df_sorted["pep"] = pep
+        df_sorted["PEP"] = pep
         # Restore original order.
-        if "group" in df_obs.columns:
-            df_sorted["orig_idx"] = df_sorted["orig_idx"].astype(int)
-            df_target = df_sorted[df_sorted["group"]=="target"].sort_values(by="orig_idx", kind="mergesort")
-            return df_target["pep"].reset_index(drop=True)
-        else:
-            df_result = df_sorted.sort_values(by="orig_idx", kind="mergesort").reset_index(drop=True)
-            df_target = df_result[df_result["label"]==0]
-            return df_target["pep"]
+        df_sorted["orig_idx"] = df_sorted["orig_idx"].astype(int)
+        df_result = df_sorted.sort_values(by="orig_idx", kind="mergesort").reset_index(drop=True)
+        df_target = df_result[df_result["label"] == 0]
+        return df_target["PEP"].reset_index(drop=True)
+    
 
 # =============================================================================
 # IsotonicPEP Class: Unified Interface for PEP Estimation
-# -----------------------------------------------------------------------------
-# Provides a unified interface pep_regression() that accepts either:
-#   - For q2pep: a Series/array/list of q-values.
-#   - For d2pep: either a single DataFrame (or tuple/numpy array) containing score and type, 
-#                  or separate target and decoy inputs.
-#
-# In both cases, the function returns a Series (or a tuple of two Series) of PEP values,
-# aligned with the original order so that users can directly assign them as new columns.
 # =============================================================================
-class IsotonicPEP(TDCIsotonicPEP):
+class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
     def __init__(self, regression_algo="ispline", ip_algo="ispline", center_method="mean", max_iter=DEFAULT_MAX_ITER):
-        super().__init__(regression_algo=regression_algo, max_iter=max_iter)
-        self.center_method = center_method
+        PreProcessing.__init__(self)
+        TDCIsotonicPEP.__init__(self, regression_algo=regression_algo, max_iter=max_iter)
         self.ip_algo = ip_algo
-    
-    def q_from_pep(self, pep_array):
+        self.center_method = center_method
+        
+    def calc_q_from_pep(self, pep_array):
         """
         Given a PEP array, compute q-values via:
            q(i) = (1 / i) * cumsum(pep[0]...pep[i]),
@@ -715,14 +758,14 @@ class IsotonicPEP(TDCIsotonicPEP):
         idx_sorted = np.argsort(pep_array, kind="mergesort")
         pep_sorted = pep_array[idx_sorted]
         csum = np.cumsum(pep_sorted)
-        ranks = np.arange(1, len(pep_sorted)+1)
+        ranks = np.arange(1, len(pep_sorted) + 1)
         q_sorted = csum / ranks
         # restore
         q_est = np.zeros_like(pep_array)
         for i, idx in enumerate(idx_sorted):
             q_est[idx] = q_sorted[i]
         return q_est
-
+    
     def q_to_pep(self, q_values, regression_algo="ispline", ip=False, ip_algo=None, center_method=None, max_iter=DEFAULT_MAX_ITER):
         """
         Compute smoothed PEP values from q-values (q2pep).
@@ -747,13 +790,8 @@ class IsotonicPEP(TDCIsotonicPEP):
                              Maximum iterations.
 
         Returns:
-            pandas.Series:
-                Smoothed PEP values aligned with the original indices.
+            pandas.Series: Smoothed PEP values aligned with the original indices.
         """
-        if center_method is None:
-            center_method = self.center_method
-        if ip_algo is None:
-            ip_algo = self.ip_algo
         # Convert to Series and record original index.
         if not isinstance(q_values, pd.Series):
             q_series = pd.Series(q_values)
@@ -768,14 +806,14 @@ class IsotonicPEP(TDCIsotonicPEP):
         qn = []
         for i in range(n):
             qn.append(q_list[i]*(i+1))
-            if i < n-1 and q_list[i] > q_list[i+1]:
+            if i < n - 1 and q_list[i] > q_list[i+1]:
                 raise AssertionError("q_values must be non-decreasing")
-        raw_pep = [qn[0]] + [qn[i]-qn[i-1] for i in range(1,n)]
+        raw_pep = [qn[0]] + [qn[i] - qn[i-1] for i in range(1, n)]
 
         if regression_algo == "PAVA":
             if ip:
                 x_positions = list(range(len(raw_pep)))
-                final_pep = self.pava_non_decreasing_interpolation(x_positions, raw_pep, ip_algo=ip_algo, center_method=center_method)
+                final_pep = self.pava_non_decreasing_interpolation(x_positions, raw_pep, ip_algo=ip_algo or self.ip_algo, center_method=center_method or self.center_method)
             else:
                 final_pep = self.pava_non_decreasing(raw_pep, [1] * len(raw_pep))
         elif regression_algo == "ispline":
@@ -787,104 +825,123 @@ class IsotonicPEP(TDCIsotonicPEP):
         pep_result = pep_sorted.reindex(orig_idx)
         return pep_result
     
-    def dprob_to_pep(self, obs=None, target=None, decoy=None, target_label="target", decoy_label="decoy", regression_algo="ispline", max_iter=DEFAULT_MAX_ITER):
+    def dprob_to_pep(self, obs, regression_algo=None, max_iter=None):
         """
         Compute PEP values from target-decoy observations (d2pep).
         
         Parameters:
-            obs            : DataFrame/tuple/numpy array, optional
-                             Contains score and label information.
-            target, decoy  : array-like, optional
-                             Separate target and decoy scores.
-            target_label   : str, optional (default="target")
-                             Label for targets.
-            decoy_label    : str, optional (default="decoy")
-                             Label for decoys.
+            obs            : Concatenated observation list [score, label_numeric] where
+                             label_numeric is 0 for targets and 1 for decoys.
             regression_algo: str, optional (default="ispline")
                              Regression method ("PAVA" or "ispline").
             max_iter       : int, optional (default=DEFAULT_MAX_ITER)
                              Maximum iterations.
 
         Returns:
-            pandas.Series:
-                Target PEP values aligned with the original order.
+            pandas.Series: Target PEP values aligned with the original order.
         """
-        if target is not None and decoy is not None:
-            df_obs = self.process_obs(target=target, decoy=decoy, obs=None, target_label=target_label, decoy_label=decoy_label)
-        else:
-            if obs is None:
-                raise ValueError("For d2pep, provide either concatenated observations as obs or both target and decoy.")
-            df_obs = self.process_obs(obs=obs, target_label=target_label, decoy_label=decoy_label)
+        if obs is None:
+            raise ValueError("For d2pep, provide concatenated observations as obs.")
+        df_obs = self.process_obs(obs=obs)
         return self.tdc_binomial_regression(df_obs, regression_algo=regression_algo, max_iter=max_iter)
-
-    def pep_regression(self, q_values=None, obs=None, target=None, decoy=None, target_label="target", decoy_label="decoy", 
-                       method="q2pep", regression_algo="ispline", max_iter=DEFAULT_MAX_ITER, ip=False, ip_algo=None, center_method=None, calc_q=True):
+    
+    def pep_regression(self, q_values=None, obs=None, calc_q_from_fdr=False, calc_q_from_pep=False, 
+                       method="q2pep", regression_algo=None, max_iter=None, ip=False, ip_algo=None, center_method=None):
         """
-        Unified interface for computing PEP values,
-        then optionally computing q-values from PEPs.
-        
-        For method "q2pep":
-            - q_values: a Series/array/list of q-values,
-            - calc_q: Boolean; if True, estimate q-values from calculated PEPs
-        
-        For method "d2pep":
-            - Either provide data as a DataFrame (or tuple) containing score and type,
-              or provide target and decoy separately,
-                * target_label, decoy_label: Target and decoy labels in column "label" when using concatenated input.
-            - calc_q: Boolean; if True, estimate q-values from calculated PEPs.
+        Unified interface for computing PEP values, then optionally computing q-values from PEPs.
         
         Parameters:
-            q_values       : array-like or pandas.Series, optional
-                             Input q-values (for q2pep).
-            obs            : DataFrame/tuple/numpy array, optional
-                             Observation data for d2pep.
-            target, decoy  : array-like, optional
-                             Separate target and decoy scores.
-            target_label   : str, optional (default="target")
-                             Label for targets.
-            decoy_label    : str, optional (default="decoy")
-                             Label for decoys.
-            method         : str, optional (default="q2pep")
-                             Either "q2pep" or "d2pep".
-            regression_algo: str, optional (default="ispline")
-                             Regression algorithm to use ("PAVA" or "ispline").
-            max_iter       : int, optional (default=DEFAULT_MAX_ITER)
-                             Maximum iterations.
-            ip             : bool, optional (default=False)
-                             If True and using PAVA for q2pep, apply interpolation.
-            ip_algo       : str, optional
-                             interpolation algorithm to use on block centers;
-                             defaults to self.ip_algo.
-            center_method  : str, optional
-                             Method for computing block centers; defaults to self.center_method.
-            calc_q         : bool, optional (default=True)
-                             If True, also compute q-values from the estimated PEPs.
+            q_values : 1-D array-like, optional
+                Target q-values.  Used only when method='q2pep' and
+                calc_q_from_fdr is False.
+            obs : ndarray (n, 2), optional
+                Concatenated observation list [score, label_numeric] where
+                label_numeric is 0 for targets and 1 for decoys. Mandatory
+                for the d2pep workflow and for q2pep when calc_q_from_fdr
+                is True.
+            calc_q_from_fdr : bool, default False
+                Compute a running FDR curve from obs and turn it into q-values.
+                If method='q2pep' and this flag is False, the function expects
+                user-supplied q_values.
+            calc_q_from_pep : bool, default False
+                After estimating the PEPs, derive q-values from them.
+            method : {'q2pep', 'd2pep'}, default 'q2pep'
+                Workflow selector.
+            regression_algo : {'PAVA', 'ispline'}, optional
+                Override the algorithm chosen when the object was constructed.
+            max_iter : int, optional
+                Maximum iterations for the I-Spline solver. Falls back to the
+                instance's default when None.
+            ip : bool, default False
+                When regression_algo=='PAVA' in the q2pep path,
+                activate smooth monotone interpolation between PAVA block centres.
+            ip_algo : {'ispline', 'pchip'}, optional
+                Interpolator backend used when ip is True (defaults to the
+                object's self.ip_algo setting).
+            center_method : {'mean', 'median'}, optional
+                How to place the x-coordinate of each PAVA block when ip is
+                True (defaults to self.center_method).
 
         Returns:
-            Depending on the method and calc_q:
-              - For q2pep: A tuple (pep_array, q_array) if calc_q is True; otherwise (pep_array, None).
-              - For d2pep: Either a Series of PEP values or a tuple (pep_array, q_array).
+            tuple (fdr_array, q1_array, pep_array, q2_array)
+            Arrays that were not requested (or cannot be produced) are returned as None.
+            Arrays are restricted to targets and in the original order:
+                * fdr_array : running FDR estimates  
+                * q1_array  : q-values derived from FDR    
+                * pep_array : smoothed PEPs  
+                * q2_array  : q-values derived from the PEPs  
         """
-        if center_method is None:
-            center_method = self.center_method
-        if ip_algo is None:
-            ip_algo = self.ip_algo
+        # Set defaults if not provided
+        regression_algo = regression_algo or self.regression_algo
+        max_iter = max_iter or self.max_iter
+        ip_algo = ip_algo or self.ip_algo
+        center_method = center_method or self.center_method
 
         if method == "q2pep":
-            if q_values is None:
-                raise ValueError("For q2pep, q-values must be provided.")
-            pep_series = self.q_to_pep(q_values=q_values, regression_algo=regression_algo, ip=ip, ip_algo=ip_algo, center_method=center_method, max_iter=max_iter)
+            if calc_q_from_fdr:
+                if obs is None:
+                    raise ValueError("For q2pep, obs must be provided when --calc-q-from-fdr is used.")
+                fdr_series, q1_series = self.calc_q_from_fdr(obs=obs)
+                target_idx = np.where(obs[:, 1] == 0)[0]
+                q1_array = q1_series.values[target_idx]
+                q_input = q1_array[target_idx]
+                fdr_array = fdr_series.values[target_idx]
+            else:
+                if q_values is None:
+                    raise ValueError("Provide q-values or enable --calc-q-from-fdr.")
+                q_input = np.array(q_values, dtype=float)
+                q1_array = None
+                fdr_array = None
+            pep_series = self.q_to_pep(q_values=q_input, regression_algo=regression_algo, ip=ip, ip_algo=ip_algo, center_method=center_method, max_iter=max_iter)
             pep_array = pep_series.values
-            if not calc_q:
-                return pep_array, None
-            q_array = self.q_from_pep(pep_array)
-            return pep_array, q_array
+            if calc_q_from_pep:
+                q2_array = self.calc_q_from_pep(pep_array)
+            else:
+                q2_array = None
+            
+            return fdr_array, q1_array, pep_array, q2_array
+
         elif method == "d2pep":
-            target_pep = self.dprob_to_pep(obs=obs, target=target, decoy=decoy, target_label=target_label, decoy_label=decoy_label, regression_algo=regression_algo, max_iter=max_iter)
-            pep_array = target_pep.values
-            if not calc_q:
-                return pep_array
-            q_array = self.q_from_pep(pep_array)
-            return pep_array, q_array
+            if obs is None:
+                raise ValueError("For d2pep, obs must be provided.")
+            
+            pep_series = self.dprob_to_pep(obs=obs, regression_algo=regression_algo, max_iter=max_iter)
+            pep_array = pep_series.values
+            if calc_q_from_fdr:
+                fdr_series, q1_series = self.calc_q_from_fdr(obs=obs)
+                target_idx = np.where(obs[:, 1] == 0)[0]
+                q1_array = q1_series.values[target_idx]
+                fdr_array = fdr_series.values[target_idx]
+            else:
+                fdr_array = None
+                q1_array = None
+            
+            if calc_q_from_pep:
+                q2_array = self.calc_q_from_pep(pep_array)
+            else:
+                q2_array = None
+            
+            return fdr_array, q1_array, pep_array, q2_array
+
         else:
             raise ValueError("Unknown method. Use 'q2pep' or 'd2pep'.")

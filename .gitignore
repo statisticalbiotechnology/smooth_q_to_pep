@@ -167,3 +167,16 @@ output_latest
 figs/*.png
 *simplified*
 pyiso_test/*
+figs/ispline/*
+figs/pyiso_test_onecrux/*
+figs/pyiso_test/*
+datasets/*/*
+!datasets/*/*.sh
+pyiso_test_onecrux/*
+pyiso_scripts/*onecrux*
+pyiso_scripts/*podman*
+pyiso_scripts/repeat_main.sh
+pyiso_scripts/run_all.sh
+pyIsoPEP/*maj*
+percolator_PEP_issues/*
+example/results/*
