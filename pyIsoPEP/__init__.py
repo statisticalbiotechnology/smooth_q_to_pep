@@ -1,5 +1,4 @@
 from importlib import metadata
-from .IsotonicPEP import IsotonicPEP
 
 __all__ = ["IsotonicPEP", "__version__"]
 
