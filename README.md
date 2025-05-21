@@ -79,7 +79,7 @@ podman run --rm -it pyisotonicpep:main d2pep -h
 | `--regression-algo {PAVA,ispline}` | `ispline` | Monotone regression backend |
 | `--calc-q-from-fdr` | off | Derive q‑values from running FDRs (needs decoys) |
 | `--calc-q-from-pep` | off | Derive q‑values **after** estimating PEPs |
-| `--output FILE|DIR` | *required* | Write a **target‑only** list; if DIR, a default name is used |
+| `--output FILE\|DIR` | *required* | Write a **target‑only** list; if DIR, a default name is used |
 | `--verbose` | off | Echo all parsed parameters |
 
 ### Additional flags – **q2pep only**
