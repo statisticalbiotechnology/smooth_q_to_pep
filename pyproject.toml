@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyIsoPEP"
+version = "0.1.0"
+description = "Estimate PEPs from empirical null models using isotonic regression."
+readme = "README.md"
+authors = [{ name = "Yuqi Zheng, Lukas Käll", email = "yuqi.zheng@scilifelab.se" }]
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "ruff"]
+
+[project.scripts]
+pyisopep = "pyIsoPEP.main:main"

@@ -4,7 +4,7 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-from IsotonicPEP import IsotonicPEP
+from .IsotonicPEP import IsotonicPEP
 
 def parse_args():
     parser = argparse.ArgumentParser(
