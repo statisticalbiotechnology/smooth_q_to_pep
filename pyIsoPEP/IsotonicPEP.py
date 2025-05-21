@@ -8,6 +8,8 @@ from scipy.optimize import lsq_linear
 DEFAULT_MAX_ITER = 5000     # Default maximum iterations for iterative solvers.
 DEFAULT_TOL = 1e-6          # Default tolerance for convergence.
 DEFAULT_NUM_BINS = 10000    # hard cap after adaptive binning
+DEFAULT_MAX_BIN_WIDTH = 20  # hard cap on rows per bin  (early region)
+DEFAULT_MIN_DECOYS = 3      # aim for ≥ this many decoys per bin
 DEFAULT_SKEW_FACTOR = 0.75  # <1 --> knots left-biased
 DEFAULT_LAMBDA = 1e-6       # ridge penalty
 EARLY_WEIGHT_FACTOR = 1.0   # 0 = off, 1 = linear boost towards top scores
@@ -225,38 +227,55 @@ class IsotonicRegression:
                 break
         return c
     
-    def bin_data(self, x, y, max_bins=DEFAULT_NUM_BINS):
+    def bin_data(self, x, y, is_decoy, max_bins=DEFAULT_NUM_BINS, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
         """
-        Adaptive equal-size binning.
-        Returns x_bin, y_bin, weight (counts).
+        Adaptive binning that
+          • tries to collect ≥ target_decoys per bin, AND
+          • never lets a bin exceed max_bin_width rows, AND
+          • never outputs more than max_bins bins.
+        
+        Parameters:
+                x, y          : Original observations (sorted in descending score order)
+                is_decoy      : Boolean, 1 indicates the row is a decoy
+                min_decoys    : Desired minimum number of decoys per bin
+                max_bin_width : Maximum number of observations allowed per bin (to prevent overly large bins in high-score regions)
+      
+        Returns:
+                x_bin, y_bin, w_bin  (all numpy arrays).
         """
         n = len(x)
         if n == 0 or max_bins <= 0:
             return np.array([]), np.array([]), np.array([])
 
-        target_size = n / max_bins
-        threshold = target_size
-        start = 0
-
         x_out, y_out, w_out = [], [], []
+        start, decoys = 0, 0
 
         for i in range(n):
-            if (i + 1 >= threshold) or (i == n - 1):
+            if is_decoy[i]:
+                decoys += 1
+            
+            need_close = (
+                decoys >= min_decoys or                         # enough decoys
+                (i - start + 1) >= max_bin_width or             # bin too wide
+                len(x_out) + 1 >= max_bins or                   # hit bin cap
+                i == n - 1                                      # last row
+            )
+
+            if need_close:
                 end = i + 1  # exclusive
                 size = end - start
-                x_avg = x[start: end].mean()
-                y_avg = y[start: end].mean()
+                x_avg = x[start:end].mean()
+                y_avg = y[start:end].mean()
 
                 x_out.append(x_avg)
                 y_out.append(y_avg)
                 w_out.append(size)
 
-                start = end
-                threshold += target_size
+                start, decoys = end, 0
 
         return (np.asarray(x_out), np.asarray(y_out), np.asarray(w_out, dtype=float))
 
-    def ispline_non_decreasing(self, raw_pep, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER, skew_factor=DEFAULT_SKEW_FACTOR, max_bins=DEFAULT_NUM_BINS, ridge_lambda=DEFAULT_LAMBDA, early_weight_factor=EARLY_WEIGHT_FACTOR):
+    def ispline_non_decreasing(self, raw_pep, is_decoy=None, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER, skew_factor=DEFAULT_SKEW_FACTOR, max_bins=DEFAULT_NUM_BINS, ridge_lambda=DEFAULT_LAMBDA, early_weight_factor=EARLY_WEIGHT_FACTOR, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
         """
         Performs I-Spline based isotonic regression on raw PEP values.
         
@@ -300,7 +319,15 @@ class IsotonicRegression:
         # 1. Prepare binned representation (speeds up regression)
         # Normalize x positions to [0, 1] and perform adaptive binning
         x = np.linspace(0, 1, N)
-        x_bin, y_bin, w_bin = self.bin_data(x, y, max_bins=max_bins)
+        if is_decoy is not None:
+            x_bin, y_bin, w_bin = self.bin_data(
+                x, y, is_decoy,
+                max_bins=max_bins,
+                min_decoys=min_decoys,
+                max_bin_width=max_bin_width
+            )
+        else:   # equal-size bins
+            x_bin, y_bin, w_bin = self.bin_data(x, y, max_bins=max_bins)
         n_bin = len(x_bin)
 
         # Emphasise early bins (optional)
@@ -709,10 +736,11 @@ class TDCIsotonicPEP(IsotonicRegression):
         pseudo = pd.DataFrame({"score": [np.nan], "label": [0.5]})
         df_aug = pd.concat([pseudo, df_sorted], ignore_index=True)
         y_values = df_aug["label"].values
+        is_dec = (y_values == 1).astype(bool)             # bool vector, pseudo row = False
         if self.regression_algo == "PAVA":
             fitted = self.pava_non_decreasing(list(y_values), [1] * len(y_values))
         elif self.regression_algo == "ispline":
-            fitted = self.ispline_non_decreasing(list(y_values), max_iter=max_iter)
+            fitted = self.ispline_non_decreasing(list(y_values), is_decoy=is_dec, max_iter=max_iter)
         else:
             raise ValueError("Unknown regression_algo. Use 'PAVA' or 'ispline'.")
         
