@@ -227,12 +227,14 @@ class IsotonicRegression:
                 break
         return c
     
-    def bin_data(self, x, y, is_decoy, max_bins=DEFAULT_NUM_BINS, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
+    def bin_data(self, x, y, is_decoy=None, max_bins=DEFAULT_NUM_BINS, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
         """
         Adaptive binning that
-          • tries to collect ≥ target_decoys per bin, AND
-          • never lets a bin exceed max_bin_width rows, AND
-          • never outputs more than max_bins bins.
+          • If `is_decoy` is None: equal-size (unweighted) binning
+          • Else:
+            * tries to collect ≥ target_decoys per bin, AND
+            * never lets a bin exceed max_bin_width rows, AND
+            * never outputs more than max_bins bins.
         
         Parameters:
                 x, y          : Original observations (sorted in descending score order)
@@ -246,7 +248,30 @@ class IsotonicRegression:
         n = len(x)
         if n == 0 or max_bins <= 0:
             return np.array([]), np.array([]), np.array([])
+        
+        # no decoy mask: equal-size bins
+        if is_decoy is None:
+            target_size = n / max_bins
+            threshold, start = target_size, 0
+            x_out, y_out, w_out = [], [], []
 
+            for i in range(n):
+                if (i + 1 >= threshold) or (i == n - 1):
+                    end = i + 1  # exclusive
+                    size = end - start
+                    x_avg = x[start:end].mean()
+                    y_avg = y[start:end].mean()
+
+                    x_out.append(x_avg)
+                    y_out.append(y_avg)
+                    w_out.append(size)
+
+                    start = end
+                    threshold += target_size
+
+            return (np.asarray(x_out), np.asarray(y_out), np.asarray(w_out, dtype=float))
+
+        # decoy-aware binning
         x_out, y_out, w_out = [], [], []
         start, decoys = 0, 0
 
@@ -319,15 +344,13 @@ class IsotonicRegression:
         # 1. Prepare binned representation (speeds up regression)
         # Normalize x positions to [0, 1] and perform adaptive binning
         x = np.linspace(0, 1, N)
-        if is_decoy is not None:
-            x_bin, y_bin, w_bin = self.bin_data(
-                x, y, is_decoy,
-                max_bins=max_bins,
-                min_decoys=min_decoys,
-                max_bin_width=max_bin_width
-            )
-        else:   # equal-size bins
-            x_bin, y_bin, w_bin = self.bin_data(x, y, max_bins=max_bins)
+        x_bin, y_bin, w_bin = self.bin_data(
+            x, y,
+            is_decoy=is_decoy,
+            max_bins=max_bins,
+            min_decoys=min_decoys,
+            max_bin_width=max_bin_width
+        )
         n_bin = len(x_bin)
 
         # Emphasise early bins (optional)

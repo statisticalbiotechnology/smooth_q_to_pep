@@ -10,7 +10,7 @@ Two workflows are available:
 | **q2pep** | rank-based | 	a list of target identifications with *q-values* |
 | **d2pep** | score-based | target‑decoy competition (TDC) output: a list of target and decoy identifications with *scores* |
 
-Internally, both workflows use isotonic regression - implemented via the Pool-Adjacent-Violators Algorithm (PAVA) or I‑Splines. Optional post-processing can be applied to derive q-values from the estimated PEPs.
+Internally, both workflows use isotonic regression - implemented via either the Pool-Adjacent-Violators Algorithm (PAVA) or I‑Splines. Optional post-processing can be applied to derive q-values from the estimated PEPs. In I‑Spline regression, for **d2pep**, scores are adaptively binned to balance decoy counts per bin, with tighter bins at lower scores. Linear weight rescaling is applied to emphasize early (low-PEP) regions.
 
 ---
 
