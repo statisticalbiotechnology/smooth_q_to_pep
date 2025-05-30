@@ -14,7 +14,7 @@ def parse_args():
 Example usage:
   1) Q2PEP:
      a) a concatenated target and decoy input file
-     ./main.py q2pep --target-file ../example/peptide.target.txt --calc-q-from-pep --output ../example/results
+     ./main.py q2pep --cat-file ../example/peptide.target.txt --qcol q-value --label-col type --target-label 0 --decoy-label 1 --calc-q-from-pep --output ../example/results
      b) separate target and decoy input files
      ./main.py q2pep --target-file ../example/peptide.target.txt --decoy-file ../example/peptide.decoy.txt --label-col type --target-label 0 --decoy-label 1 --calc-q-from-fdr --calc-q-from-pep --output ../example/results
 
@@ -66,9 +66,11 @@ Example usage:
                             help="Regression algorithm to use: 'PAVA' or 'ispline' (default: ispline).")
 
         p.add_argument("--calc-q-from-fdr", action="store_true", dest="calc_q_from_fdr",
-                            help="Estimate FDRs and q-values from target and decoy scores before calculating PEPs. Required if no q-values are provided to q2pep; optional when q-values are provided to q2pep or for d2pep. (default: disabled).")
+                            help="Estimate FDRs and q-values from target and decoy scores before calculating PEPs. Required if no q-values are provided to q2pep; optional when q-values are provided to q2pep or for d2pep (default: disabled).")
         p.add_argument("--calc-q-from-pep", action="store_true", dest="calc_q_from_pep",
                             help="Calculate q-values from estimated PEPs (default: disabled).")
+        p.add_argument("-k", "--keep-input-order", action="store_true", dest="keep_input_order",
+                            help="Write the output in the original input order (default: disabled, sort output by ascending PEPs).")
         p.add_argument("--output", type=str, required=True, metavar="FILE|DIR", 
                             help="Output file path (or output directory; if directory, a default name 'outputPEP.target.dbased.txt' or 'outputPEP.target.qbased.txt' will be used. Note: only target PEPs are saved.)")
         
@@ -77,7 +79,7 @@ Example usage:
     
     return parser.parse_args()
 
-def load_data(args):
+def load_data(args, require_score):
     """
     Load input data and return a tuple (df_target, obs):
       - df_target: DataFrame of target entries preserving input order.
@@ -88,44 +90,47 @@ def load_data(args):
     """
     if args.cat_file:   # concatenated input mode
         df = pd.read_csv(args.cat_file, sep="\t")
-        for col in (args.score_col, args.label_col):
-            if col not in df.columns:
-                sys.exit(f"Column '{col}' is missing from --cat-file.")
-
+        if args.label_col not in df.columns:
+            sys.exit(f"Column '{args.label_col}' is missing from --cat-file.")
+        if require_score and args.score_col not in df.columns:
+            sys.exit(f"Column '{args.score_col}' is missing from --cat-file.")
+        # df = df.sort_values(args.score_col, ascending=False, kind='mergesort')
         df = df.copy()
         df['pyIsoPEP label'] = df[args.label_col].astype(str).str.lower()
-        df_target = df[df["pyIsoPEP label"] == args.target_label.lower()].reset_index(drop=True)
         label_map = {args.target_label.lower(): 0.0, args.decoy_label.lower(): 1.0}
-        num = df["pyIsoPEP label"].map(label_map)
-        if num.isnull().any():
+        if not set(df["pyIsoPEP label"]).issubset(label_map.keys()):
             sys.exit("Unrecognised labels in --cat-file (check --target-label/--decoy-label).")
-        scores = df[args.score_col].astype(float).values
-        obs = np.column_stack([scores, num.values])
 
+        df_target = df[df["pyIsoPEP label"] == args.target_label.lower()].reset_index(drop=True)
+        if not require_score:
+            return df_target, None
+        scores = df[args.score_col].astype(float).values
+        num = df["pyIsoPEP label"].map(label_map)
+        obs = np.column_stack([scores, num.values])
         return df_target, obs
     
     # separate input mode
     df_target = pd.read_csv(args.target_file, sep="\t")
-    if args.score_col not in df_target.columns:
-        sys.exit(f"Column '{args.score_col}' missing from --target-file.")
     df_target = df_target.copy()
     df_target['pyIsoPEP label'] = 'target'
+    if not require_score:   # target‑only input without scores (allowed for q2pep when q‑values are provided)
+        return df_target, None
+    
+    if args.decoy_file is None:
+        sys.exit("--decoy-file is required.")
+    df_decoy = pd.read_csv(args.decoy_file, sep="\t")
+    df_decoy = df_decoy.copy()
+    df_decoy['pyIsoPEP label'] = 'decoy'
+    if args.score_col not in df_target.columns:
+        sys.exit(f"Column '{args.score_col}' missing from --target-file.")
+    if args.score_col not in df_decoy.columns:
+        sys.exit(f"Column '{args.score_col}' missing from --decoy-file.")
+    df = pd.concat([df_target, df_decoy], ignore_index=True)
+    num = df['pyIsoPEP label'].map({'target': 0.0, 'decoy': 1.0}).values
+    scores = df[args.score_col].astype(float).values
+    obs = np.column_stack([scores, num])
 
-    if args.decoy_file:
-        df_decoy = pd.read_csv(args.decoy_file, sep="\t")
-        if args.score_col not in df_decoy.columns:
-            sys.exit(f"Column '{args.score_col}' missing from --decoy-file.")
-        df_decoy = df_decoy.copy()
-        df_decoy['pyIsoPEP label'] = 'decoy'
-
-        df = pd.concat([df_target, df_decoy], ignore_index=True)
-        num = df['pyIsoPEP label'].map({'target': 0.0, 'decoy': 1.0}).values
-        scores = df[args.score_col].astype(float).values
-        obs = np.column_stack([scores, num])
-
-        return df_target, obs
-    else:   # target‑only input (allowed for q2pep when q‑values are provided)
-        return df_target.reset_index(drop=True), None
+    return df_target.reset_index(drop=True), obs
 
 def main():
     args = parse_args()
@@ -136,7 +141,8 @@ def main():
             print(f"  {arg}: {value}")
 
     # Load data
-    df_target, obs = load_data(args)
+    require_score = (args.method == "d2pep") or args.calc_q_from_fdr
+    df_target, obs = load_data(args, require_score)
 
     # Initialize PEP processor
     pep_regressor = IsotonicPEP(
@@ -180,7 +186,14 @@ def main():
     if args.calc_q_from_pep and q2_arr is not None:
         df_target['pyIsoPEP q-value from PEP'] = q2_arr
     df_target = df_target.drop(columns=['pyIsoPEP label'])
-
+    if not args.keep_input_order:
+        by = ["pyIsoPEP PEP"]
+        ascending = [True]
+        if args.score_col in df_target.columns:
+            by.append(args.score_col)
+            ascending.append(False)
+        df_target = df_target.sort_values(by=by, ascending=ascending, kind="mergesort").reset_index(drop=True)
+    
     out_path = args.output
     if os.path.isdir(out_path):
         suffix = "qbased" if args.method == "q2pep" else "dbased"

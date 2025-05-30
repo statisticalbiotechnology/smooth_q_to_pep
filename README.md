@@ -1,7 +1,7 @@
 # `pyIsoPEP`: Isotonic PEP Estimator
 
 ## Overview
-`pyIsoPEP` provides both a [**Docker image**](https://github.com/statisticalbiotechnology/smooth_q_to_pep/pkgs/container/pyisotonicpep) and a [**Python API**](https://pypi.org/project/pyIsoPEP/) with a unified interface for estimating smooth, non‑decreasing Posterior Error Probabilities (PEPs) using isotonic regression for target identifications in shotgun proteomics.
+`pyIsoPEP` provides both a [**Docker image**](https://github.com/statisticalbiotechnology/smooth_q_to_pep/pkgs/container/pyisotonicpep) and a [**Python API**](https://pypi.org/project/pyIsoPEP/) with a unified interface for estimating smooth, non‑decreasing Posterior Error Probabilities (PEPs) directly from empirical null models using isotonic regression for target identifications in shotgun proteomics.
 
 Two workflows are available:
 
@@ -10,7 +10,10 @@ Two workflows are available:
 | **q2pep** | rank-based | 	a list of target identifications with *q-values* |
 | **d2pep** | score-based | target‑decoy competition (TDC) output: a list of target and decoy identifications with *scores* |
 
-Internally, both workflows use isotonic regression - implemented via either the Pool-Adjacent-Violators Algorithm (PAVA) or I‑Splines. Optional post-processing can be applied to derive q-values from the estimated PEPs. In I‑Spline regression, for **d2pep**, scores are adaptively binned to balance decoy counts per bin, with tighter bins at lower scores. Linear weight rescaling is applied to emphasize early (low-PEP) regions.
+Internally, both workflows use isotonic regression - implemented via either the Pool-Adjacent-Violators Algorithm (PAVA) or I‑Splines. Optional post-processing can be applied to derive q-values from the estimated PEPs. 
+
+pyIsoPEP substantially enhances the robustness of PEP estimation and supports post-processing for both **DDA** and **DIA** data. The same implementation is also incorporated into [**Percolator**](http://percolator.ms/) (C++).
+
 
 ---
 
@@ -79,6 +82,7 @@ podman run --rm -it pyisotonicpep:main d2pep -h
 | `--regression-algo {PAVA,ispline}` | `ispline` | Monotone regression backend |
 | `--calc-q-from-fdr` | off | Derive q‑values from running FDRs (needs decoys) |
 | `--calc-q-from-pep` | off | Derive q‑values **after** estimating PEPs |
+| `-k`, `--keep-input-order` | off | Write output in original input order |
 | `--output FILE\|DIR` | *required* | Write a **target‑only** list; if DIR, a default name is used |
 | `--verbose` | off | Echo all parsed parameters |
 

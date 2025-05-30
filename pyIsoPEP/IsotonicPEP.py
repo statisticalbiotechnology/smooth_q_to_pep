@@ -12,7 +12,7 @@ DEFAULT_MAX_BIN_WIDTH = 20  # hard cap on rows per bin  (early region)
 DEFAULT_MIN_DECOYS = 3      # aim for ≥ this many decoys per bin
 DEFAULT_SKEW_FACTOR = 0.75  # <1 --> knots left-biased
 DEFAULT_LAMBDA = 1e-6       # ridge penalty
-EARLY_WEIGHT_FACTOR = 1.0   # 0 = off, 1 = linear boost towards top scores
+EARLY_WEIGHT_FACTOR = 0   # 0 = off, 1 = linear boost towards top scores
 
 
 # =============================================================================
@@ -46,7 +46,7 @@ class PreProcessing:
         df_sorted = df.sort_values(by="score", ascending=False, kind="mergesort").reset_index(drop=True)
         df_sorted["cumulative_target"] = (df_sorted["label"] == 0).cumsum()
         df_sorted["cumulative_decoy"] = (df_sorted["label"] == 1).cumsum()
-        df_sorted["FDR"] = (df_sorted["cumulative_decoy"] + 0.5) / df_sorted["cumulative_target"]
+        df_sorted["FDR"] = (df_sorted["cumulative_decoy"] + 0.5) / (df_sorted["cumulative_target"] + 0.5)
 
         q = df_sorted["FDR"].values.copy()
         for i in range(len(q) - 2, -1, -1):
@@ -59,40 +59,6 @@ class PreProcessing:
 
 # =============================================================================
 # Base Class for Isotonic Regression in Real Space
-# -----------------------------------------------------------------------------
-# This class implements methods for enforcing a non-decreasing constraint 
-# on a sequence of values. It provides:
-#
-# Regression:
-#
-#   - pava_non_decreasing():
-#       Implements the standard Pool-Adjacent-Violators Algorithm (PAVA)
-#       for stepwise-constant isotonic regression.
-#
-#   - ispline_non_decreasing():
-#       Performs I-Spline-based monotonic regression on a given sequence.
-#
-#   - constrained_least_squares():
-#       A helper method using FISTA to solve constrained least squares 
-#       problems.
-#
-# Interpolation:
-#
-#   - pava_non_decreasing_interpolation():
-#       A variant that performs I-Spline or Fritsch-Carlson interpolation 
-#       between PAVA-derived block centers to produce a smooth, monotonic 
-#       cubic spline.
-#
-#   - ispline_monotonic_interpolate():
-#       Performs monotonic interpolation using I-Splines.
-#
-#   - fritsch_carlson_monotonic_interpolate():
-#       Performs monotonic interpolation using Fritsch-Carlson monotonic 
-#       cubic interpolation (PCHIP).
-#
-#   - boundary_derivative_fritsch_carlson():
-#       Computes the boundary derivatives used in Fritsch-Carlson 
-#       interpolation to maintain monotonicity at endpoints.
 # =============================================================================
 class IsotonicRegression:
     def __init__(self):
@@ -248,8 +214,7 @@ class IsotonicRegression:
         n = len(x)
         if n == 0 or max_bins <= 0:
             return np.array([]), np.array([]), np.array([])
-        
-        # no decoy mask: equal-size bins
+        is_decoy=None   # no decoy mask: equal-size bins
         if is_decoy is None:
             target_size = n / max_bins
             threshold, start = target_size, 0
@@ -300,6 +265,47 @@ class IsotonicRegression:
 
         return (np.asarray(x_out), np.asarray(y_out), np.asarray(w_out, dtype=float))
 
+    def ispline_non_decreasing_without_binning(self, raw_pep, is_decoy=None, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER, skew_factor=DEFAULT_SKEW_FACTOR, max_bins=DEFAULT_NUM_BINS, ridge_lambda=DEFAULT_LAMBDA, early_weight_factor=EARLY_WEIGHT_FACTOR, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
+
+        y = np.array(raw_pep)
+        N = len(y)
+        if N == 0:
+            return []
+
+        x = np.linspace(0, 1, N)
+        m = int(np.sqrt(N))
+        
+        t = np.linspace(0., 1., m + 1)
+        knots = 1.0 - (1.0 - t)**skew_factor
+
+        B = np.zeros((N, m))
+        for j in range(m):
+            u = (x - knots[j]) / (knots[j+1] - knots[j])
+            u = np.clip(u, 0, 1)
+            B[:, j] = np.where(
+                x < knots[j],
+                0.0,
+                np.where(
+                    x >= knots[j+1],
+                    1.0,
+                    3 * u**2 - 2 * u**3
+                )
+            )
+
+        X = np.column_stack((np.ones(N), B))
+        p = m + 1
+        X_aug = np.vstack([X, np.sqrt(ridge_lambda) * np.eye(p)])
+        y_aug = np.concatenate([y, np.zeros(p)])
+
+        lower_bounds = np.concatenate(([-np.inf], np.zeros(m)))
+        upper_bounds = np.full(p, np.inf)
+        res = lsq_linear(X_aug, y_aug, bounds=(lower_bounds, upper_bounds))
+
+        c = res.x
+        fitted = X @ c
+        fitted = np.clip(fitted, min_value, max_value)
+        return fitted.tolist()
+    
     def ispline_non_decreasing(self, raw_pep, is_decoy=None, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER, skew_factor=DEFAULT_SKEW_FACTOR, max_bins=DEFAULT_NUM_BINS, ridge_lambda=DEFAULT_LAMBDA, early_weight_factor=EARLY_WEIGHT_FACTOR, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
         """
         Performs I-Spline based isotonic regression on raw PEP values.
@@ -760,9 +766,9 @@ class TDCIsotonicPEP(IsotonicRegression):
         df_aug = pd.concat([pseudo, df_sorted], ignore_index=True)
         y_values = df_aug["label"].values
         is_dec = (y_values == 1).astype(bool)             # bool vector, pseudo row = False
-        if self.regression_algo == "PAVA":
+        if regression_algo == "PAVA":
             fitted = self.pava_non_decreasing(list(y_values), [1] * len(y_values))
-        elif self.regression_algo == "ispline":
+        elif regression_algo == "ispline":
             fitted = self.ispline_non_decreasing(list(y_values), is_decoy=is_dec, max_iter=max_iter)
         else:
             raise ValueError("Unknown regression_algo. Use 'PAVA' or 'ispline'.")
@@ -792,30 +798,20 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
         
     def calc_q_from_pep(self, pep_array):
         """
-        Given a PEP array, compute q-values via:
+        Given a sorted PEP array, compute q-values via:
            q(i) = (1 / i) * cumsum(pep[0]...pep[i]),
-        where pep_array is sorted in ascending order.
+        where pep_array has already been sorted in ascending order.
 
-        Steps:
-          - (a) sort pep_array ascending using mergesort,
-          - (b) cumsum,
-          - (c) divide by rank,
-          - (d) restore original order.
-
+        Parameters:
+            pep_array : array-like sorted PEPs
         Returns:
             An array of estimated q-values aligned with the input order.
         """
-        pep_array = np.array(pep_array, dtype=float)
-        idx_sorted = np.argsort(pep_array, kind="mergesort")
-        pep_sorted = pep_array[idx_sorted]
-        csum = np.cumsum(pep_sorted)
-        ranks = np.arange(1, len(pep_sorted) + 1)
-        q_sorted = csum / ranks
-        # restore
-        q_est = np.zeros_like(pep_array)
-        for i, idx in enumerate(idx_sorted):
-            q_est[idx] = q_sorted[i]
-        return q_est
+        pep = np.asarray(pep_array, dtype=float)
+        q = np.cumsum(pep) / np.arange(1, len(pep) + 1)
+        # avoid numerical noise
+        q = np.maximum.accumulate(q)
+        return q
     
     def q_to_pep(self, q_values, regression_algo="ispline", ip=False, ip_algo=None, center_method=None, max_iter=DEFAULT_MAX_ITER):
         """
@@ -827,7 +823,7 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
         
         Parameters:
             q_values      : array-like or pandas.Series
-                            Sorted in ascending order.
+                             Already sorted in ascending order.
             regression_algo: str, optional (default="ispline")
                              Regression method ("PAVA" or "ispline").
             ip            : bool, optional (default=False)
@@ -841,24 +837,19 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
                              Maximum iterations.
 
         Returns:
-            pandas.Series: Smoothed PEP values aligned with the original indices.
+            pandas.Series: Smoothed semi-monotonic PEP values aligned with the original indices.
         """
-        # Convert to Series and record original index.
         if not isinstance(q_values, pd.Series):
             q_series = pd.Series(q_values)
         else:
             q_series = q_values.copy()
-        orig_idx = q_series.index.copy()
-
-        # Sort q_values in ascending order.
-        q_series_sorted = q_series.sort_values(ascending=True, kind="mergesort")
-        q_list = q_series_sorted.values.tolist()
+        q_list = q_series.values.tolist()
         n = len(q_list)
         qn = []
         for i in range(n):
             qn.append(q_list[i]*(i+1))
             if i < n - 1 and q_list[i] > q_list[i+1]:
-                raise AssertionError("q_values must be non-decreasing")
+                raise AssertionError("q-values must be non-decreasing")
         raw_pep = [qn[0]] + [qn[i] - qn[i-1] for i in range(1, n)]
 
         if regression_algo == "PAVA":
@@ -871,12 +862,10 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
             final_pep = self.ispline_non_decreasing(raw_pep, max_iter=max_iter)
         else:
             raise ValueError("Unknown regression_algo. Use 'PAVA' or 'ispline'.")
-        
-        pep_sorted = pd.Series(final_pep, index=q_series_sorted.index)
-        pep_result = pep_sorted.reindex(orig_idx)
-        return pep_result
+
+        return pd.Series(final_pep, index=q_series.index)
     
-    def dprob_to_pep(self, obs, regression_algo=None, max_iter=None):
+    def dprob_to_pep(self, obs, regression_algo="ispline", max_iter=None):
         """
         Compute PEP values from target-decoy observations (d2pep).
         
@@ -900,6 +889,9 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
                        method="q2pep", regression_algo=None, max_iter=None, ip=False, ip_algo=None, center_method=None):
         """
         Unified interface for computing PEP values, then optionally computing q-values from PEPs.
+        The routine internally normalises all arrays to descending score order so that every chain  
+                                    score ↓ → q1 ↑ → pep ↑ → q2 ↑
+        is monotonic by construction.
         
         Parameters:
             q_values : 1-D array-like, optional
@@ -953,45 +945,71 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
                 if obs is None:
                     raise ValueError("For q2pep, obs must be provided when --calc-q-from-fdr is used.")
                 fdr_series, q1_series = self.calc_q_from_fdr(obs=obs)
-                target_idx = np.where(obs[:, 1] == 0)[0]
-                q1_array = q1_series.values[target_idx]
-                q_input = q1_array[target_idx]
-                fdr_array = fdr_series.values[target_idx]
+                target_mask = (obs[:, 1] == 0)
+                q_input_raw = q1_series[target_mask].values
+                fdr_array = fdr_series[target_mask].values
             else:
                 if q_values is None:
                     raise ValueError("Provide q-values or enable --calc-q-from-fdr.")
-                q_input = np.array(q_values, dtype=float)
-                q1_array = None
+                q_input_raw = np.asarray(q_values, dtype=float)
                 fdr_array = None
-            pep_series = self.q_to_pep(q_values=q_input, regression_algo=regression_algo, ip=ip, ip_algo=ip_algo, center_method=center_method, max_iter=max_iter)
-            pep_array = pep_series.values
-            if calc_q_from_pep:
-                q2_array = self.calc_q_from_pep(pep_array)
+            # sort q1 ascendingly
+            idx_sorted = np.argsort(q_input_raw, kind="mergesort")
+            q1_sorted = q_input_raw[idx_sorted]
+            # q2pep: with ascending q-values
+            pep_sorted = self.q_to_pep(q_values=q1_sorted, regression_algo=regression_algo, ip=ip, ip_algo=ip_algo, center_method=center_method, max_iter=max_iter).values
+            # pep2q
+            q2_sorted = (self.calc_q_from_pep(pep_sorted) if calc_q_from_pep else None)
+            
+            # restore PEPs/q2 back to original order
+            pep_array = np.empty_like(pep_sorted)
+            pep_array[idx_sorted] = pep_sorted
+
+            if q2_sorted is not None:
+                q2_array = np.empty_like(q2_sorted)
+                q2_array[idx_sorted] = q2_sorted
             else:
                 q2_array = None
+            # restore q1 back to original order
+            q1_array = np.empty_like(q1_sorted)
+            q1_array[idx_sorted] = q1_sorted
             
             return fdr_array, q1_array, pep_array, q2_array
 
         elif method == "d2pep":
             if obs is None:
                 raise ValueError("For d2pep, obs must be provided.")
-            
+            # PEPs with original order
             pep_series = self.dprob_to_pep(obs=obs, regression_algo=regression_algo, max_iter=max_iter)
             pep_array = pep_series.values
+            # generate indices of descending target scores
+            target_idx = np.where(obs[:, 1] == 0)[0]
+            scores_target = obs[target_idx, 0].astype(float)
+            order_score_desc = np.argsort(-scores_target, kind="mergesort")
+            # sort PEPs by descending scores
+            pep_sorted = pep_array[order_score_desc]
+
             if calc_q_from_fdr:
                 fdr_series, q1_series = self.calc_q_from_fdr(obs=obs)
-                target_idx = np.where(obs[:, 1] == 0)[0]
-                q1_array = q1_series.values[target_idx]
-                fdr_array = fdr_series.values[target_idx]
+                fdr_sorted = fdr_series.iloc[target_idx].values[order_score_desc]
+                q1_sorted  = q1_series.iloc[target_idx].values[order_score_desc]
             else:
-                fdr_array = None
-                q1_array = None
+                fdr_sorted = None
+                q1_sorted = None
             
             if calc_q_from_pep:
-                q2_array = self.calc_q_from_pep(pep_array)
+                q2_sorted = self.calc_q_from_pep(pep_sorted)
             else:
-                q2_array = None
+                q2_sorted = None
             
+            # restore original target order
+            rev_order = np.empty_like(order_score_desc)
+            rev_order[order_score_desc] = np.arange(len(order_score_desc))
+
+            pep_array = pep_sorted[rev_order]
+            q2_array  = q2_sorted[rev_order] if q2_sorted is not None else None
+            fdr_array = fdr_sorted[rev_order] if fdr_sorted is not None else None
+            q1_array  = q1_sorted[rev_order] if q1_sorted is not None else None
             return fdr_array, q1_array, pep_array, q2_array
 
         else:
