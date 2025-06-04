@@ -1,7 +1,7 @@
 # `pyIsoPEP`: Isotonic PEP Estimator
 
 ## Overview
-`pyIsoPEP` provides both a [**Docker image**](https://github.com/statisticalbiotechnology/smooth_q_to_pep/pkgs/container/pyisotonicpep) and a [**Python API**](https://pypi.org/project/pyIsoPEP/) with a unified interface for estimating smooth, non‑decreasing Posterior Error Probabilities (PEPs) directly from empirical null models using isotonic regression for target identifications in shotgun proteomics.
+`pyIsoPEP` provides both a [**Docker image**](https://github.com/statisticalbiotechnology/smooth_q_to_pep/pkgs/container/pyisotonicpep) (Docker-, Podman-, and Apptainer-compatible) and a [**Python API**](https://pypi.org/project/pyIsoPEP/) with a unified interface for estimating smooth, non‑decreasing Posterior Error Probabilities (PEPs) directly from empirical null models using isotonic regression for target identifications in shotgun proteomics.
 
 Two workflows are available:
 
@@ -31,7 +31,11 @@ pip install pyIsoPEP
 podman pull ghcr.io/statisticalbiotechnology/pyisotonicpep:main
 # or
 docker pull ghcr.io/statisticalbiotechnology/pyisotonicpep:main
+# or
+apptainer build pyisopep.sif docker://ghcr.io/statisticalbiotechnology/pyisotonicpep:main
 ```
+
+Podman is a lightweight, daemonless alternative to Docker. The Docker image can also be downloaded and assembled into a container using Apptainer, which can be run on both local machines and high-performance computing (HPC) clusters.
 
 ---
 
@@ -57,6 +61,8 @@ Top‑level help:
 pyisopep -h
 # or
 podman run --rm -it pyisotonicpep:main -h
+# or
+apptainer run pyisopep.sif -h
 ```
 
 Workflow‑specific help:
@@ -67,6 +73,9 @@ pyisopep d2pep -h
 # or
 podman run --rm -it pyisotonicpep:main q2pep -h
 podman run --rm -it pyisotonicpep:main d2pep -h
+# or
+apptainer run pyisopep.sif q2pep -h
+apptainer run pyisopep.sif d2pep -h
 ```
 
 ### Common flags (valid for *both* workflows)

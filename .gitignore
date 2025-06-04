@@ -178,5 +178,13 @@ pyiso_scripts/*podman*
 pyiso_scripts/repeat_main.sh
 pyiso_scripts/run_all.sh
 pyIsoPEP/*maj*
+pyIsoPEP/IsotonicPEPslim.py
 percolator_PEP_issues/*
 example/results/*
+*.ipynb
+pyiso_scripts/test_design.md
+scripts/*
+maj30/*
+data/*
+pyiso_test/*
+pyiso_test_onecrux/*
