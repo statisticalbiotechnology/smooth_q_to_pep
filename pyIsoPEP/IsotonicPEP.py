@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.optimize import lsq_linear
+from scipy.interpolate import BSpline
 
 # =============================================================================
 # Module-Level Default Parameters
@@ -265,6 +266,35 @@ class IsotonicRegression:
 
         return (np.asarray(x_out), np.asarray(y_out), np.asarray(w_out, dtype=float))
 
+    def _build_ispline_basis(self, x, t, order=4):
+        """
+        Build the I-spline basis matrix for evaluation points x and knot vector t.
+
+        Each column j is the integral of the j-th M-spline (normalised B-spline of
+        degree order-1), scaled so that it transitions from 0 to 1 over its support
+        [t[j], t[j+order]].  Gives C^(order-2) continuity at interior knots.
+
+        Parameters:
+            x     : numpy.ndarray, shape (n,)  — evaluation points
+            t     : numpy.ndarray              — extended knot vector (boundary knots
+                                                 repeated `order` times)
+            order : int (default 4)            — spline order (4 = cubic)
+
+        Returns:
+            numpy.ndarray, shape (n, n_basis)  where n_basis = len(t) - order
+        """
+        n_basis = len(t) - order
+        B = np.zeros((len(x), n_basis))
+        for j in range(n_basis):
+            c = np.zeros(n_basis)
+            c[j] = 1.0
+            bspl  = BSpline(t, c, order - 1)
+            ibspl = bspl.antiderivative()
+            span  = t[j + order] - t[j]
+            if span > 0:
+                B[:, j] = np.clip(order / span * (ibspl(x) - ibspl(t[j])), 0.0, 1.0)
+        return B
+
     def ispline_non_decreasing_without_binning(self, raw_pep, is_decoy=None, min_value=0.0, max_value=1.0, max_iter=DEFAULT_MAX_ITER, skew_factor=DEFAULT_SKEW_FACTOR, max_bins=DEFAULT_NUM_BINS, ridge_lambda=DEFAULT_LAMBDA, early_weight_factor=EARLY_WEIGHT_FACTOR, min_decoys=DEFAULT_MIN_DECOYS, max_bin_width=DEFAULT_MAX_BIN_WIDTH):
 
         y = np.array(raw_pep)
@@ -273,31 +303,25 @@ class IsotonicRegression:
             return []
 
         x = np.linspace(0, 1, N)
-        m = int(np.sqrt(N))
-        
-        t = np.linspace(0., 1., m + 1)
-        knots = 1.0 - (1.0 - t)**skew_factor
+        order = 4
+        n_segments = int(np.sqrt(N))
 
-        B = np.zeros((N, m))
-        for j in range(m):
-            u = (x - knots[j]) / (knots[j+1] - knots[j])
-            u = np.clip(u, 0, 1)
-            B[:, j] = np.where(
-                x < knots[j],
-                0.0,
-                np.where(
-                    x >= knots[j+1],
-                    1.0,
-                    3 * u**2 - 2 * u**3
-                )
-            )
+        t_uniform = np.linspace(0., 1., n_segments + 1)
+        knot_positions = 1.0 - (1.0 - t_uniform) ** skew_factor
+        # Interior knots only (strictly between boundaries)
+        interior_knots = knot_positions[1:-1]
+
+        t = np.r_[[x[0]] * order, interior_knots, [x[-1]] * order]
+        n_basis = len(t) - order
+
+        B = self._build_ispline_basis(x, t, order)
 
         X = np.column_stack((np.ones(N), B))
-        p = m + 1
+        p = n_basis + 1
         X_aug = np.vstack([X, np.sqrt(ridge_lambda) * np.eye(p)])
         y_aug = np.concatenate([y, np.zeros(p)])
 
-        lower_bounds = np.concatenate(([-np.inf], np.zeros(m)))
+        lower_bounds = np.concatenate(([-np.inf], np.zeros(n_basis)))
         upper_bounds = np.full(p, np.inf)
         res = lsq_linear(X_aug, y_aug, bounds=(lower_bounds, upper_bounds))
 
@@ -364,39 +388,23 @@ class IsotonicRegression:
             scale = 1.0 + early_weight_factor * (n_bin - 1 - np.arange(n_bin)) / (n_bin - 1)
             w_bin *= scale
 
-        # 2. Construct I‑Spline design matrix
-        k = int(np.sqrt(n_bin))
-        # compute adaptive knots and build knot vector
-        # total knots = k + 1  (including the two ends)
-        knots = [x_bin[0]]
-        for i in range(1, k):
-            q = 1.0 - (1.0 - i / k) ** skew_factor      # double q = 1 - pow(...)
-            idx = int(round(q * (n_bin - 1)))                 # size_t idx = q*(x.size()-1)
-            knots.append(x_bin[idx])
-        knots.append(x_bin[-1])
-        knots = np.asarray(knots)
-        m = len(knots) - 1        # number of basis functions (intervals)
+        # 2. Construct true I-Spline design matrix
+        order = 4
+        n_segments = int(np.sqrt(n_bin))
 
-        # Construct the cubic I-Spline basis matrix for binned data.
-        # For each interval [knots[j], knots[j+1]], define:
-        #    I_j(x) = 0                         if x < knots[j],
-        #             3u^2 - 2u^3               if knots[j] <= x < knots[j+1],
-        #             1                         if x >= knots[j+1],
-        # where u = (x - knots[j]) / (knots[j+1] - knots[j]).
-        B = np.zeros((n_bin, m))
-        for j in range(m):
-            # Compute the normalized coordinate u.
-            u = (x_bin - knots[j]) / (knots[j + 1] - knots[j])
-            u = np.clip(u, 0, 1)
-            B[:, j] = np.where(
-                x_bin < knots[j],
-                0.0,
-                np.where(
-                    x_bin >= knots[j+1],
-                    1.0,
-                    3 * u**2 - 2 * u**3
-                )
-            )
+        # Build interior knots using the skew factor (excluding boundary points)
+        interior_knots = []
+        for i in range(1, n_segments):
+            q = 1.0 - (1.0 - i / n_segments) ** skew_factor
+            idx = int(round(q * (n_bin - 1)))
+            interior_knots.append(x_bin[idx])
+
+        # Extended knot vector with order-fold repeated boundaries
+        t = np.r_[[x_bin[0]] * order, interior_knots, [x_bin[-1]] * order]
+        n_basis = len(t) - order   # = order + (n_segments - 1)
+
+        B = self._build_ispline_basis(x_bin, t, order)
+
         # Add an intercept column to the design matrix.
         X = np.column_stack((np.ones(n_bin), B))
         # apply weights  (W½ = sqrt(w))
@@ -412,26 +420,13 @@ class IsotonicRegression:
         # Solve the constrained least squares problem:
         # minimize ||Xc - y||^2
         # subject to: c[1: ] >= 0 (the intercept c[0] is unconstrained).
-        lower_bounds = np.concatenate(([-np.inf], np.zeros(m)))
-        # upper_bounds = np.full(m + 1, np.inf)
+        lower_bounds = np.concatenate(([-np.inf], np.zeros(n_basis)))
         upper_bounds = np.full(p, np.inf)
         res = lsq_linear(X_aug, y_aug, bounds=(lower_bounds, upper_bounds))
         c = res.x
-        # c = self.constrained_least_squares(X_aug, y_aug, lower_bounds, upper_bounds, max_iter=max_iter)
-        
-        # 3. Evaluate fitted spline on original x grid
-        # build same basis but on x_full
-        B_full = np.zeros((N, m))
-        for j in range(m):
-            u = (x - knots[j]) / (knots[j + 1] - knots[j])
-            u = np.clip(u, 0.0, 1.0)
-            B_full[:, j] = np.where(
-                x < knots[j],
-                0.0,
-                np.where(x >= knots[j + 1],
-                        1.0,
-                        3 * u ** 2 - 2 * u ** 3)
-            )
+
+        # 3. Evaluate fitted spline on original x grid using the same knot vector
+        B_full = self._build_ispline_basis(x, t, order)
         
         X_full = np.column_stack((np.ones(N), B_full))
 
