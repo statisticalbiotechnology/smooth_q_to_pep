@@ -65,121 +65,101 @@ class IsotonicRegression:
             result.extend([clamped_avg] * block["count"])
         return result
 
+    def _normalize_to_unit_interval(self, x):
+        x_min, x_max = np.min(x), np.max(x)
+        span = x_max - x_min
+        if span <= 0.0:
+            return np.full_like(x, 0.5)
+        return (x - x_min) / span
+
     def _make_default_knots(self, x_norm, degree=3):
         n = len(x_norm)
+        if n == 0:
+            return np.array([])
+            
         x_sorted = np.sort(x_norm)
-        lo = float(x_sorted[0])
-        hi = float(x_sorted[-1])
+        lo, hi = float(x_sorted[0]), float(x_sorted[-1])
         if hi <= lo:
             hi = lo + 1e-6
 
         num_internal = min(200, int(np.sqrt(n)))
+        
+        quantiles = np.linspace(0, 1, num_internal + 2)[1:-1]
+        indices = np.clip((quantiles * (n - 1)).astype(int), 0, n - 1)
+        candidates = x_sorted[indices]
+        
         internal = []
         prev = lo
-        for k in range(1, num_internal + 1):
-            q = k / (num_internal + 1)
-            idx = min(int(q * (n - 1)), n - 1)
-            val = float(x_sorted[idx])
+        for val in candidates:
             if val > lo + 1e-12 and val < hi - 1e-12 and val > prev + 1e-12:
-                internal.append(val)
+                internal.append(float(val))
                 prev = val
-
+                
         order = degree + 1
-        t = [lo] * order + internal + [hi] * order
-        return np.array(t, dtype=float)
+        knots = [lo] * order + internal + [hi] * order
+        return np.array(knots, dtype=float)
 
-    def _build_ispline_basis(self, x, t, degree=3, include_intercept=True):
-        n_knots = len(t)
-        n_bspline = n_knots - degree - 1
+    def _build_ispline_basis(self, x_norm, t, degree=3, include_intercept=True):
+        n = len(x_norm)
+        n_bspline = len(t) - degree - 1
 
         if n_bspline <= 1:
-            return np.ones((len(x), 1))
+            return np.ones((n, 1))
 
-        I = np.zeros((len(x), n_bspline))
-        for j in range(n_bspline):
-            span = t[j + degree + 1] - t[j]
-            if span <= 0:
-                continue
-            c = np.zeros(n_bspline)
-            c[j] = 1.0
-            ibspl = BSpline(t, c, degree).antiderivative()
-            I[:, j] = np.clip(
-                (degree + 1) / span * (ibspl(x) - ibspl(t[j])), 0.0, 1.0
-            )
+        B = BSpline.design_matrix(x_norm, t, degree).toarray()
+
+        I = np.cumsum(B[:, ::-1], axis=1)[:, ::-1]
+        I = I[:, 1:]
+        I = np.clip(I, 0.0, 1.0)
 
         if include_intercept:
-            return np.column_stack([np.ones(len(x)), I])
+            return np.column_stack([np.ones(n), I])
         return I
 
-    def _build_ispline_basis_deboor(self, x, t, degree=3, include_intercept=True):
-        k = degree + 1              # order of M-spline B-splines
-        n_knots = len(t)
-        n_orig = n_knots - k        # number of order-k B-splines
-
-        # Build augmented knot vector for order k+1: add one extra boundary knot at each end
-        t_aug = np.concatenate([[t[0]], t, [t[-1]]])
-
-        k1 = k + 1
-        n_high = len(t_aug) - k1    # number of order-k1 B-splines
-
-        if n_orig <= 1 or n_high <= 0:
-            return np.ones((len(x), 1))
-
-        # Evaluate order-k1 B-splines on the augmented knot vector
-        B1 = np.zeros((len(x), n_high))
-        for j in range(n_high):
-            c = np.zeros(n_high)
-            c[j] = 1.0
-            B1[:, j] = BSpline(t_aug, c, degree + 1)(x)
-
-        # Weighted reverse cumulative sum
-        I = np.zeros((len(x), n_orig))
-        for i in range(n_orig):
-            denom = t[i + k] - t[i]
-            if denom <= 0:
-                continue
-            col = np.zeros(len(x))
-            for j in range(i, n_high):
-                numer = t_aug[j + k] - t_aug[j]
-                if numer <= 0:
-                    continue
-                col += (numer / denom) * B1[:, j]
-            I[:, i] = np.clip(col, 0.0, 1.0)
-
-        if include_intercept:
-            return np.column_stack([np.ones(len(x)), I])
-        return I
-
-    def _fit_ispline(self, x, y, ridge_lambda=DEFAULT_LAMBDA,
-                     smooth_lambda=DEFAULT_SMOOTH_LAMBDA,
+    def _fit_ispline(self, x, y, ridge_lambda=0.0, smooth_lambda=0.0,
                      min_value=0.0, max_value=1.0, degree=3):
         n = len(x)
-        t = self._make_default_knots(x, degree=degree)
-        X = self._build_ispline_basis(x, t, degree=degree, include_intercept=True)
+        if n == 0:
+            return np.array([])
+            
+        x_norm = self._normalize_to_unit_interval(x)
+        
+        t = self._make_default_knots(x_norm, degree=degree)
+        X = self._build_ispline_basis(x_norm, t, degree=degree, include_intercept=True)
+        
         p = X.shape[1]
-        n_ispline = p - 1  # columns 1..p-1 are I-splines; column 0 is intercept
+        col0_s = 1
+        n_ispline = p - col0_s
 
         inv_sqrt_n = 1.0 / np.sqrt(max(1, n))
-        Xw = X * inv_sqrt_n
-        yw = y * inv_sqrt_n
+        A_blocks = [X * inv_sqrt_n]
+        b_blocks = [y * inv_sqrt_n]
 
-        X_aug = np.vstack([Xw, np.sqrt(ridge_lambda) * np.eye(p)])
-        y_aug = np.concatenate([yw, np.zeros(p)])
+        if ridge_lambda > 0.0:
+            A_blocks.append(np.sqrt(ridge_lambda) * np.eye(p))
+            b_blocks.append(np.zeros(p))
 
         if smooth_lambda > 0.0 and n_ispline > 2:
             nd = n_ispline - 2
             D = np.zeros((nd, p))
             for di in range(nd):
-                D[di, 1 + di] = 1.0
-                D[di, 1 + di + 1] = -2.0
-                D[di, 1 + di + 2] = 1.0
-            X_aug = np.vstack([X_aug, np.sqrt(smooth_lambda) * D])
-            y_aug = np.concatenate([y_aug, np.zeros(nd)])
+                D[di, col0_s + di] = 1.0
+                D[di, col0_s + di + 1] = -2.0
+                D[di, col0_s + di + 2] = 1.0
+            A_blocks.append(np.sqrt(smooth_lambda) * D)
+            b_blocks.append(np.zeros(nd))
 
-        lower_bounds = np.concatenate(([-np.inf], np.zeros(n_ispline)))
-        upper_bounds = np.full(p, np.inf)
-        res = lsq_linear(X_aug, y_aug, bounds=(lower_bounds, upper_bounds))
-        return np.clip(X @ res.x, min_value, max_value)
+        A = np.vstack(A_blocks)
+        b = np.concatenate(b_blocks)
+
+        lb = np.full(p, 0.0)
+        lb[0] = -np.inf  
+        ub = np.full(p, np.inf)
+
+        res = lsq_linear(A, b, bounds=(lb, ub))
+        y_hat = X @ res.x
+        
+        return np.clip(y_hat, min_value, max_value)
 
     def ispline_non_decreasing(self, raw_pep, min_value=0.0, max_value=1.0,
                                 ridge_lambda=DEFAULT_LAMBDA,
