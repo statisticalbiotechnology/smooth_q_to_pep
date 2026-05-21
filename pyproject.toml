@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyIsoPEP"
-version = "0.1.3"
+version = "0.1.4"
 description = "Estimate PEPs from empirical null models using isotonic regression."
 readme = "README.md"
 authors = [{ name = "Yuqi Zheng, Lukas Käll", email = "yuqi.zheng@scilifelab.se" }]
