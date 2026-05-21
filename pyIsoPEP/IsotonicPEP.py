@@ -7,6 +7,7 @@ DEFAULT_MAX_ITER = 1000
 DEFAULT_LAMBDA = 1e-4
 DEFAULT_SMOOTH_LAMBDA = 1e-3
 PEP_CLIP_LO = 1e-10
+DEFAULT_EPSILON = 5e-5
 
 
 class PreProcessing:
@@ -207,7 +208,7 @@ class TDCIsotonicPEP(IsotonicRegression):
         self.pava = pava
         self.max_iter = max_iter
 
-    def tdc_to_pep(self, df_obs, pava=None, max_iter=None):
+    def tdc_to_pep(self, df_obs, pava=None):
         pava = self.pava if pava is None else pava
 
         df_sorted = df_obs.sort_values(by="score", ascending=False, kind="mergesort").reset_index(drop=True)
@@ -253,49 +254,131 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
         q = np.maximum.accumulate(q)
         return q
 
-    def q_to_pep(self, q_values, scores=None, pava=False, max_iter=DEFAULT_MAX_ITER):
+    def _detect_qvalue_plateaus(self, q_sorted, min_size=2, min_middle=8,
+                                 breach_threshold=1.0, breach_window=100):
+        n = len(q_sorted)
+        if n < min_middle + 2 * min_size:
+            return 0, 0
+        lead = int(np.searchsorted(q_sorted, q_sorted[0], side="right"))
+        trail = n - int(np.searchsorted(q_sorted, q_sorted[-1], side="left"))
+        if lead < min_size:
+            lead = 0
+        if trail < min_size:
+            trail = 0
+
+        if trail > 0 and n - lead - trail > breach_window + min_middle:
+            raw = np.empty(n, dtype=float)
+            raw[0] = q_sorted[0]
+            kk = np.arange(1, n, dtype=float)
+            raw[1:] = q_sorted[1:] * (kk + 1.0) - q_sorted[:-1] * kk
+            cum_raw = np.concatenate(([0.0], np.cumsum(raw)))
+            W = breach_window
+            current_mid_end = n - trail
+            me_arr = np.arange(max(lead + min_middle, W), current_mid_end + 1)
+            if me_arr.size > 0:
+                window_means = (cum_raw[me_arr] - cum_raw[me_arr - W]) / W
+                breach = window_means > breach_threshold
+                if breach.any():
+                    first = int(np.argmax(breach))
+                    new_mid_end = int(me_arr[first]) - 1
+                    if new_mid_end < current_mid_end:
+                        trail = n - new_mid_end
+
+        overshoot = lead + trail - (n - min_middle)
+        if overshoot > 0:
+            if lead >= trail:
+                lead = max(0, lead - overshoot)
+            else:
+                trail = max(0, trail - overshoot)
+        return lead, trail
+
+    def q_to_pep(self, q_values, scores=None, pava=False,
+                 trim_plateaus=False, min_plateau_size=2,
+                 pseudo_count=True):
+        pc_value = 0.5 if pseudo_count else 0.0
         if not isinstance(q_values, pd.Series):
             q_series = pd.Series(q_values)
         else:
             q_series = q_values.copy()
-        q_list = q_series.values.tolist()
-        n = len(q_list)
+        q_arr = q_series.values.astype(float)
+        n = len(q_arr)
 
-        qn = []
-        for i in range(n):
-            qn.append(q_list[i] * (i + 1))
-            if i < n - 1 and q_list[i] > q_list[i + 1]:
-                raise ValueError("q-values must be non-decreasing.")
-        raw_pep = [qn[0]] + [qn[i] - qn[i - 1] for i in range(1, n)]
+        if n > 1 and np.any(np.diff(q_arr) < 0):
+            raise ValueError("q-values must be non-decreasing.")
 
-        if n > 0:
-            pseudo = 0.5 / n
-            raw_pep = [v + pseudo for v in raw_pep]
+        q_arr = np.clip(q_arr, DEFAULT_EPSILON, 1.0 - DEFAULT_EPSILON)
+
+        if trim_plateaus:
+            lead, trail = self._detect_qvalue_plateaus(q_arr, min_size=min_plateau_size)
+        else:
+            lead, trail = 0, 0
+
+        mid_start, mid_end = lead, n - trail
+        n_mid = mid_end - mid_start
+        if n_mid < 2:
+            lead, trail = 0, 0
+            mid_start, mid_end, n_mid = 0, n, n
+
+        self.plateau_lead_ = lead
+        self.plateau_trail_ = trail
+
+        raw_pep_mid = np.empty(n_mid, dtype=float)
+        if mid_start == 0:
+            raw_pep_mid[0] = q_arr[0]
+            if n_mid > 1:
+                k = np.arange(1, n_mid, dtype=float)
+                raw_pep_mid[1:] = q_arr[1:n_mid] * (k + 1.0) - q_arr[0:n_mid - 1] * k
+        else:
+            q_prev = q_arr[mid_start - 1]
+            raw_pep_mid[0] = q_arr[mid_start] * (mid_start + 1.0) - q_prev * mid_start
+            if n_mid > 1:
+                k = np.arange(mid_start + 1, mid_end, dtype=float)
+                raw_pep_mid[1:] = (q_arr[mid_start + 1:mid_end] * (k + 1.0)
+                                   - q_arr[mid_start:mid_end - 1] * k)
+
+        if pc_value > 0 and n_mid > 0:
+            raw_pep_mid = raw_pep_mid + (pc_value / n_mid)
 
         if scores is None:
             if pava:
-                final_pep = self.pava_non_decreasing(raw_pep, [1] * n, min_value=PEP_CLIP_LO)
+                fitted_mid = self.pava_non_decreasing(
+                    raw_pep_mid.tolist(), [1] * n_mid, min_value=PEP_CLIP_LO,
+                )
             else:
-                final_pep = self.ispline_non_decreasing(raw_pep, min_value=PEP_CLIP_LO)
+                fitted_mid = self.ispline_non_decreasing(raw_pep_mid, min_value=PEP_CLIP_LO)
+            fitted_mid = np.asarray(fitted_mid, dtype=float)
         else:
             sc = np.asarray(scores, dtype=float)
             if len(sc) != n:
                 raise ValueError("q_values and scores must have the same length.")
+            sc_mid = sc[mid_start:mid_end]
             if pava:
-                ord_desc = np.argsort(-sc, kind="mergesort")
-                rp_arr = np.array(raw_pep)
-                fitted_sorted = self.pava_non_decreasing(rp_arr[ord_desc].tolist(), [1] * n, min_value=PEP_CLIP_LO)
-                inv_ord = np.empty(n, dtype=int)
-                inv_ord[ord_desc] = np.arange(n)
-                final_pep = np.array(fitted_sorted)[inv_ord].tolist()
+                ord_desc = np.argsort(-sc_mid, kind="mergesort")
+                fitted_sorted = self.pava_non_decreasing(
+                    raw_pep_mid[ord_desc].tolist(), [1] * n_mid, min_value=PEP_CLIP_LO,
+                )
+                inv_ord = np.empty(n_mid, dtype=int)
+                inv_ord[ord_desc] = np.arange(n_mid)
+                fitted_mid = np.asarray(fitted_sorted, dtype=float)[inv_ord]
             else:
-                final_pep = self.ispline_non_decreasing_xy(sc, raw_pep, min_value=PEP_CLIP_LO)
+                fitted_mid = np.asarray(
+                    self.ispline_non_decreasing_xy(sc_mid, raw_pep_mid, min_value=PEP_CLIP_LO),
+                    dtype=float,
+                )
 
-        return pd.Series(final_pep, index=q_series.index)
+        pep_full = np.empty(n, dtype=float)
+        pep_full[mid_start:mid_end] = fitted_mid
+        if lead > 0:
+            pep_full[:lead] = q_arr[0]
+        if trail > 0:
+            pep_full[mid_end:] = max(float(q_arr[-1]), float(fitted_mid[-1]))
+
+        return pd.Series(pep_full, index=q_series.index)
 
     def pep_regression(self, q_values=None, obs=None, target_scores=None,
                        calc_q_from_fdr=False, calc_q_from_pep=False,
-                       method="q2pep", pava=None, max_iter=None):
+                       method="q2pep", pava=None,
+                       trim_plateaus=False, pseudo_count=True):
         pava = self.pava if pava is None else pava
 
         if method in ("q2pep", "qns2pep"):
@@ -332,6 +415,8 @@ class IsotonicPEP(PreProcessing, TDCIsotonicPEP):
                 q_values=q1_sorted,
                 scores=scores_for_fit,
                 pava=pava,
+                trim_plateaus=trim_plateaus,
+                pseudo_count=pseudo_count,
             ).values
             q2_sorted = self.calc_q_from_pep(pep_sorted) if calc_q_from_pep else None
 

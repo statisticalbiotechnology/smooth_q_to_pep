@@ -46,6 +46,15 @@ def parse_args():
                           help="Column name for q-values in the input file (default: 'q-value').")
     parser_q.add_argument("--score-based", action="store_true", dest="score_based",
                           help="Use raw scores as the independent variable instead of rank.")
+    parser_q.add_argument("--trim-plateaus", action="store_true", dest="trim_plateaus",
+                          default=False,
+                          help="Enable trimming of leading/trailing q-value plateaus before "
+                               "isotonic regression (default: trimming disabled).")
+    parser_q.add_argument("--no-pseudo-count", action="store_false", dest="pseudo_count",
+                          default=True,
+                          help="Disable the Jeffreys-style smoothing added to raw PEPs before "
+                               "isotonic regression (default: enabled, value 0.5 distributed as "
+                               "0.5 / n_mid per rank).")
 
     parser_d = subparsers.add_parser("d2pep", help="Estimate PEPs from TDC scores.")
 
@@ -163,6 +172,8 @@ def main():
                 pava=args.pava,
                 calc_q_from_fdr=args.calc_q_from_fdr,
                 calc_q_from_pep=args.calc_q_from_pep,
+                trim_plateaus=args.trim_plateaus,
+                pseudo_count=args.pseudo_count,
             )
         else:
             if args.calc_q_from_fdr and obs is None:
@@ -176,6 +187,8 @@ def main():
                 pava=args.pava,
                 calc_q_from_fdr=args.calc_q_from_fdr,
                 calc_q_from_pep=args.calc_q_from_pep,
+                trim_plateaus=args.trim_plateaus,
+                pseudo_count=args.pseudo_count,
             )
 
     else:  # d2pep subcommand
