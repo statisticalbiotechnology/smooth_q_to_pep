@@ -43,7 +43,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/pyIsotonicPEP
+          images: ghcr.io/${{ github.repository_owner }}/pyIsoPEP
           flavor: |
             latest=auto
           tags: |
@@ -51,8 +51,8 @@ jobs:
             type=semver,pattern={{version}}
             type=sha,format=long
           labels: |
-            org.opencontainers.image.title=pyIsotonicPEP
-            org.opencontainers.image.description="Image for estimating Posterior Error Probabilities (PEPs) for identifications using isotonic regression in shotgun proteomics."
+            org.opencontainers.image.title=pyIsoPEP
+            org.opencontainers.image.description="Image for estimating Posterior Error Probabilities (PEPs) for individual identifications using isotonic regression in shotgun proteomics."
             org.opencontainers.image.url=${{ github.event.repository.html_url }}
             org.opencontainers.image.source=${{ github.event.repository.html_url }}
   
